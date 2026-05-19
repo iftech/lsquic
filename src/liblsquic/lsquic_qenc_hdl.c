@@ -526,10 +526,6 @@ qeh_write_headers (struct qpack_enc_hdl *qeh, lsquic_stream_id_t stream_id,
     return retval;
 }
 
-
-#if !defined(NDEBUG) && __GNUC__
-__attribute__((weak))
-#endif
 enum qwh_status
 lsquic_qeh_write_headers (struct qpack_enc_hdl *qeh,
     lsquic_stream_id_t stream_id, unsigned seqno,
@@ -544,10 +540,6 @@ lsquic_qeh_write_headers (struct qpack_enc_hdl *qeh,
         return QWH_ERR;
 }
 
-
-#if !defined(NDEBUG) && __GNUC__
-__attribute__((weak))
-#endif
 uint64_t
 lsquic_qeh_enc_off (struct qpack_enc_hdl *qeh)
 {
