@@ -1,7 +1,7 @@
 /* Copyright (c) 2017 - 2026 LiteSpeed Technologies Inc.  See LICENSE. */
 #pragma once
-#include <ws2tcpip.h>
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 typedef SSIZE_T ssize_t;
 struct iovec {

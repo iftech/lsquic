@@ -526,6 +526,7 @@ qeh_write_headers (struct qpack_enc_hdl *qeh, lsquic_stream_id_t stream_id,
     return retval;
 }
 
+LSQUIC_TEST_WEAK
 enum qwh_status
 lsquic_qeh_write_headers (struct qpack_enc_hdl *qeh,
     lsquic_stream_id_t stream_id, unsigned seqno,
@@ -540,6 +541,7 @@ lsquic_qeh_write_headers (struct qpack_enc_hdl *qeh,
         return QWH_ERR;
 }
 
+LSQUIC_TEST_WEAK
 uint64_t
 lsquic_qeh_enc_off (struct qpack_enc_hdl *qeh)
 {

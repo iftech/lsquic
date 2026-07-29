@@ -156,19 +156,16 @@ const char *const lsq_loglevel2str[N_LSQUIC_LOG_LEVELS] = {
 };
 
 
-#if defined(_WIN32) && !defined(__MINGW32__) && !defined(__MINGW64__)
-struct timezone
+#ifdef WIN32
+#define DELTA_EPOCH_IN_TICKS  116444736000000000ULL
+struct lsquic_timezone
 {
     time_t tz_minuteswest;         /* minutes W of Greenwich */
     time_t tz_dsttime;             /* type of dst correction */
 };
-#endif
-
-#ifdef WIN32
-#define DELTA_EPOCH_IN_TICKS  116444736000000000ULL
 
 static int
-gettimeofday (struct timeval *tv, struct timezone *tz)
+gettimeofday (struct timeval *tv, struct lsquic_timezone *tz)
 {
     FILETIME ft;
     uint64_t tmpres;

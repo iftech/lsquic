@@ -6,6 +6,13 @@
 #ifndef LSQUIC_UTIL_H
 #define LSQUIC_UTIL_H 1
 
+#if !defined(NDEBUG) && defined(__GNUC__) && !defined(_WIN32) \
+                                            && !defined(WIN32)
+#define LSQUIC_TEST_WEAK __attribute__((weak))
+#else
+#define LSQUIC_TEST_WEAK
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

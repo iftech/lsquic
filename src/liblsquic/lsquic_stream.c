@@ -4304,6 +4304,7 @@ lsquic_stream_id (const lsquic_stream_t *stream)
 }
 
 
+LSQUIC_TEST_WEAK
 struct lsquic_conn *
 lsquic_stream_conn (const lsquic_stream_t *stream)
 {
@@ -4364,6 +4365,7 @@ lsquic_stream_close (lsquic_stream_t *stream)
 }
 
 
+LSQUIC_TEST_WEAK
 void
 lsquic_stream_acked (struct lsquic_stream *stream,
                                             enum quic_frame_type frame_type)
