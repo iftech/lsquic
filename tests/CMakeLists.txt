@@ -8,6 +8,9 @@ SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DLSQUIC_TEST=1")
 IF (MSVC)
     SET(LIB_FLAGS "-FORCE:MULTIPLE")
 ELSE()
+    IF (WIN32)
+        SET(LIB_FLAGS "-Wl,--allow-multiple-definition")
+    ENDIF()
     SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-unused-value")
     IF (CMAKE_C_COMPILER_ID STREQUAL GNU)
         SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-override-init")
@@ -32,6 +35,7 @@ SET(TESTS
     blocked_gquic_be
     bw_sampler
     conn_close_gquic_be
+    conn_close_ietf
     crypto_gen
     cubic
     dec
@@ -45,6 +49,8 @@ SET(TESTS
     goaway_gquic_be
     hkdf
     hpi
+    http_prio_header
+    http1x_if
     lsquic_hash
     mini_conn_delay
     packet_out
@@ -53,19 +59,23 @@ SET(TESTS
     parse_packet_in
     purga
     push_disabled
+    qenc_hdl
     qlog
     quic_be_floats
     reg_pkt_headergen
     rst_stream_gquic_be
     rtt
     send_headers
+    send_ctl_accounting
     send_ctl_bw_lifecycle
     senhist
+    sess_resume
     set
     sfcw
     shi
     spi
     stop_waiting_gquic_be
+    stk
     streamgen
     streamparse
     tokgen
@@ -81,6 +91,7 @@ IF (CMAKE_SYSTEM_NAME STREQUAL "Linux")
 ENDIF()
 
 IF (NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    SET(TESTS ${TESTS} bounds_helpers)
     # No regexes on Windows
     SET(TESTS ${TESTS} ack_merge)
     # No open_memstream() on Windows
@@ -142,7 +153,10 @@ ENDIF()
 IF(NOT MSVC)
 ADD_EXECUTABLE(graph_cubic graph_cubic.c ${ADDL_SOURCES})
 TARGET_LINK_LIBRARIES(graph_cubic ${LIBS})
+ENDIF()
 
+# Uses open(), O_RDONLY and getopt directly
+IF(NOT WIN32)
 ADD_EXECUTABLE(mini_parse mini_parse.c ${ADDL_SOURCES})
 TARGET_LINK_LIBRARIES(mini_parse ${LIBS})
 ENDIF()
@@ -152,6 +166,9 @@ ADD_TEST(min_heap test_min_heap)
 
 SET(MALO_SRC test_malo.c ../src/liblsquic/lsquic_malo.c)
 ADD_EXECUTABLE(test_malo_pooled ${MALO_SRC})
+IF(LSQUIC_FIU)
+    TARGET_LINK_LIBRARIES(test_malo_pooled fiu)
+ENDIF()
 IF(MSVC)
     TARGET_LINK_LIBRARIES(test_malo_pooled ${GETOPT_LIB})
 ENDIF()
@@ -160,6 +177,9 @@ SET_TARGET_PROPERTIES(test_malo_pooled
 ADD_TEST(malo_pooled test_malo_pooled)
 
 ADD_EXECUTABLE(test_malo_nopool ${MALO_SRC})
+IF(LSQUIC_FIU)
+    TARGET_LINK_LIBRARIES(test_malo_nopool fiu)
+ENDIF()
 IF(MSVC)
     TARGET_LINK_LIBRARIES(test_malo_nopool ${GETOPT_LIB})
 ENDIF()

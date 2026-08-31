@@ -13,6 +13,7 @@ OPTION(LSQUIC_TESTS "Compile library unit tests" ON)
 OPTION(LSQUIC_SHARED_LIB "Compile as shared librarry" OFF)
 OPTION(LSQUIC_DEVEL "Compile in development mode" OFF)
 OPTION(LSQUIC_WEBTRANSPORT "Enable WebTransport support" OFF)
+OPTION(LSQUIC_ASAN "Enable AddressSanitizer in Debug builds" ON)
 
 INCLUDE(GNUInstallDirs)
 INCLUDE(CheckSymbolExists)
@@ -63,7 +64,7 @@ ENDIF()
 
 IF(CMAKE_BUILD_TYPE STREQUAL "Debug")
     SET(MY_CMAKE_FLAGS "${MY_CMAKE_FLAGS} -O0 -g3")
-    IF(CMAKE_C_COMPILER MATCHES "clang" AND
+    IF(LSQUIC_ASAN AND CMAKE_C_COMPILER MATCHES "clang" AND
                         NOT CMAKE_SYSTEM_NAME STREQUAL "Android" AND
                         NOT "$ENV{TRAVIS}" MATCHES "^true$" AND
                         NOT "$ENV{EXTRA_CFLAGS}" MATCHES "-fsanitize")
@@ -122,7 +123,7 @@ SET(MY_CMAKE_FLAGS "${MY_CMAKE_FLAGS} /wd4706")	# assignment within conditional 
 SET(MY_CMAKE_FLAGS "${MY_CMAKE_FLAGS} /wd4090")	# different 'const' qualifier (TODO: debug ls-sfparser.c)
 SET(MY_CMAKE_FLAGS "${MY_CMAKE_FLAGS} /wd4305")	# truncation from double to float
 SET(MY_CMAKE_FLAGS "${MY_CMAKE_FLAGS} /wd4201") # Allow nameless structs
-SET(MY_CMAKE_FLAGS "${MY_CMAKE_FLAGS} -W4 -WX -Zi -DWIN32_LEAN_AND_MEAN -DNOMINMAX -D_CRT_SECURE_NO_WARNINGS -I${CMAKE_CURRENT_SOURCE_DIR}/wincompat")
+SET(MY_CMAKE_FLAGS "${MY_CMAKE_FLAGS} -W4 -WX -Zi -D_CRT_SECURE_NO_WARNINGS")
 IF(LSQUIC_SHARED_LIB)
     SET(MY_CMAKE_FLAGS "${MY_CMAKE_FLAGS} -DLSQUIC_SHARED_LIB")
 ENDIF()
@@ -137,6 +138,13 @@ ELSE()
 ENDIF()
 
 ENDIF() #MSVC
+
+# WIN32_LEAN_AND_MEAN implies NOCRYPT, which keeps <windows.h> from including
+# <wincrypt.h>, whose X509_NAME macro collides with the TLS library type.
+IF (WIN32)
+    INCLUDE_DIRECTORIES(${CMAKE_CURRENT_SOURCE_DIR}/wincompat)
+    ADD_DEFINITIONS(-DWIN32_LEAN_AND_MEAN -DNOMINMAX)
+ENDIF()
 
 find_package(Perl)
 IF(NOT PERL_FOUND)
@@ -385,10 +393,10 @@ IF (LSQUIC_BIN)
 ENDIF()
 
 
-IF (NOT MSVC)
-    LIST(APPEND LIBS pthread m)
-ELSE()
+IF (WIN32)
     LIST(APPEND LIBS ws2_32)
+ELSE()
+    LIST(APPEND LIBS pthread m)
 ENDIF()
 
 IF (LSQUIC_BIN)
