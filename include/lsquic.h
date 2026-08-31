@@ -26,8 +26,8 @@ extern "C" {
 #endif
 
 #define LSQUIC_MAJOR_VERSION 4
-#define LSQUIC_MINOR_VERSION 7
-#define LSQUIC_PATCH_VERSION 0
+#define LSQUIC_MINOR_VERSION 9
+#define LSQUIC_PATCH_VERSION 4
 
 #define LSQUIC_QUOTE(x)     #x
 #define LSQUIC_SVAL(v)      LSQUIC_QUOTE(v)
@@ -107,8 +107,9 @@ enum lsquic_version
 };
 
 /**
- * We currently support versions 43, 46, 50, Draft-27, Draft-29,
- * and IETF QUIC v1.
+ * We currently support Google QUIC versions Q043, Q046, and Q050,
+ * IETF QUIC Draft-27 and Draft-29, and IETF QUIC v1 and v2.
+ * Deprecated and experimental versions are not enabled by default.
  * @see lsquic_version
  */
 #define LSQUIC_SUPPORTED_VERSIONS ((1 << N_LSQVER) - 1)
@@ -121,7 +122,8 @@ enum lsquic_version
 #define LSQUIC_EXPERIMENTAL_VERSIONS ( \
                             (1 << LSQVER_RESVED))
 
-#define LSQUIC_DEPRECATED_VERSIONS ((1 << LSQVER_ID27))
+#define LSQUIC_DEPRECATED_VERSIONS ((1 << LSQVER_043) | (1 << LSQVER_046) | \
+                                    (1 << LSQVER_050) | (1 << LSQVER_ID27))
 
 #define LSQUIC_GQUIC_HEADER_VERSIONS (1 << LSQVER_043)
 
@@ -321,6 +323,16 @@ typedef struct ssl_ctx_st * (*lsquic_lookup_cert_f)(
  *  completed (assuming the peer supports this setting frame type).
  */
 #define LSQUIC_DF_MAX_HEADER_LIST_SIZE 0
+
+/** Server default for the maximum number of completed header sets buffered
+ *  on an HTTP stream while awaiting application processing.
+ */
+#define LSQUIC_DF_MAX_HEADER_SETS_SERVER 1
+
+/** Client default for the maximum number of completed header sets buffered
+ *  on an HTTP stream while awaiting application processing.
+ */
+#define LSQUIC_DF_MAX_HEADER_SETS_CLIENT 2
 
 /** Default value of UAID (user-agent ID). */
 #define LSQUIC_DF_UA               "LSQUIC"
@@ -670,7 +682,7 @@ struct lsquic_engine_settings {
      * this number of times in a row without making progress (that is,
      * reading, writing, or changing stream state), loop break will occur.
      *
-     * The defaut value is @ref LSQUIC_DF_PROGRESS_CHECK.
+     * The default value is @ref LSQUIC_DF_PROGRESS_CHECK.
      */
     unsigned        es_progress_check;
 
@@ -864,7 +876,7 @@ struct lsquic_engine_settings {
      * send PING frames in the absence of other activity.
      *
      * By default, the server does not send PINGs and the period is set to zero.
-     * The client's defaut value is @ref LSQUIC_DF_PING_PERIOD.
+     * The client's default value is @ref LSQUIC_DF_PING_PERIOD.
      */
     unsigned        es_ping_period;
 
@@ -1182,7 +1194,21 @@ struct lsquic_engine_settings {
      * Default value is @ref LSQUIC_DF_MAX_WEBTRANSPORT_SERVER_STREAMS.
      */
     unsigned        es_max_webtransport_server_streams;
-#endif    
+#endif
+
+    /**
+     * Maximum number of completed header sets that may be buffered on an
+     * HTTP stream while awaiting application processing.  When the limit is
+     * reached, HTTP/3 parsing on the stream is suspended until the application
+     * claims enough header sets to bring the queue below the limit.  Receiving
+     * an additional gQUIC header set is treated as a connection error.  This is
+     * a local receive limit and has no corresponding peer setting.  It must be
+     * greater than zero.
+     *
+     * Default value is @ref LSQUIC_DF_MAX_HEADER_SETS_SERVER in server mode
+     * and @ref LSQUIC_DF_MAX_HEADER_SETS_CLIENT in client mode.
+     */
+    unsigned        es_max_header_sets;
 };
 
 /* Initialize `settings' to default values */
@@ -1606,7 +1632,8 @@ lsquic_conn_going_away (lsquic_conn_t *);
 
 /**
  * This forces connection close.  on_conn_closed and on_close callbacks
- * will be called.
+ * will be called.  Closing an established IETF QUIC connection sends a
+ * transport-level CONNECTION_CLOSE frame with the NO_ERROR code.
  */
 void
 lsquic_conn_close (lsquic_conn_t *);
@@ -1769,25 +1796,18 @@ void *
 lsquic_stream_get_hset (lsquic_stream_t *);
 
 /**
- * A server may push a stream.  This call creates a new stream in reference
- * to stream `s'.  It will behave as if the client made a request: it will
- * trigger on_new_stream() event and it can be used as a regular client-
- * initiated stream.
+ * Server push is not supported.  This function is retained for API
+ * compatibility.
  *
- * `hdr_set' must be set.  It is passed as-is to @lsquic_stream_get_hset.
- *
- * @retval  0   Stream pushed successfully.
- * @retval  1   Stream push failed because it is disabled or because we hit
- *                stream limit or connection is going away.
- * @retval -1   Stream push failed because of an internal error.
+ * @retval  1   Stream push failed because server push is not supported.
  */
 int
 lsquic_conn_push_stream (lsquic_conn_t *c, void *hdr_set, lsquic_stream_t *s,
     const lsquic_http_headers_t *headers);
 
 /**
- * Only makes sense in server mode: the client cannot push a stream and this
- * function always returns false in client mode.
+ * Server push is not supported.  This function is retained for API
+ * compatibility and always returns false.
  */
 int
 lsquic_conn_is_push_enabled (lsquic_conn_t *);
@@ -1840,7 +1860,10 @@ lsquic_stream_get_ctx (const lsquic_stream_t *s);
 void
 lsquic_stream_set_ctx (lsquic_stream_t *stream, lsquic_stream_ctx_t *ctx);
 
-/** Returns true if this is a pushed stream */
+/**
+ * Retained for API compatibility with removed server push support.  Current
+ * LSQUIC versions do not create pushed streams.
+ */
 int
 lsquic_stream_is_pushed (const lsquic_stream_t *s);
 
@@ -1852,22 +1875,21 @@ int
 lsquic_stream_is_rejected (const lsquic_stream_t *s);
 
 /**
- * Refuse pushed stream.  Call it from @ref on_new_stream.
+ * Retained for API compatibility with removed server push support.  Current
+ * LSQUIC versions do not create pushed streams.
  *
- * No need to call lsquic_stream_close() after this.  on_close will be called.
- *
- * @see lsquic_stream_is_pushed
+ * @see lsquic_stream_is_pushed.
  */
 int
 lsquic_stream_refuse_push (lsquic_stream_t *s);
 
 /**
- * Get information associated with pushed stream:
+ * Retained for API compatibility with removed server push support.  Current
+ * LSQUIC versions do not create pushed streams.
  *
- * @param ref_stream_id   Stream ID in response to which push promise was
- *                            sent.
- * @param hdr_set         Header set.  This object was passed to or generated
- *                            by @ref lsquic_conn_push_stream().
+ * @param ref_stream_id   Legacy output parameter for stream ID in response
+ *                            to which a push promise would have been sent.
+ * @param hdr_set         Legacy output parameter for the push header set.
  *
  * @retval   0  Success.
  * @retval  -1  This is not a pushed stream.

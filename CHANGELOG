@@ -1,3 +1,73 @@
+2026-08-30
+    - 4.9.4
+    - [FIX] Notify peer on explicit IETF connection close (#675)
+    - [FIX] WebTransport flag corruption (#674)
+    - [FIX] Roll back header send state on stash failure.
+
+2026-07-31
+    - 4.9.3
+    - [FIX] Cancel failed QPACK header transactions
+    - Update to ls-qpack 2.7.0 to allow all header cancellations
+    - [FIX] MinGW compatibility (#670)
+    - [FIX] Preserve HTTP header errors in QPACK decode handler
+
+2026-07-26
+    - 4.9.2
+    - [FIX, SPEC] Require 3 uni streams for HTTP/3 connections
+    - [FIX] Abort connection when STOP_SENDING comes in for a critical stream
+    - [FIX] Fix unreadable HQ filter error state
+    - [FIX] Reset errno before parsing content length
+    - [FIX] Use ls-qpack 2.6.6 to pick up latest fix
+    - [FIX] Abort if QDEC handler cannot write to fral-backed stream
+
+2026-07-15
+    - 4.9.0
+    - [API, IMPROVEMENT] Limit number of buffered header sets to cap
+      memory use.
+    - [FIX] Client: return correct error on bad transport parameters
+      (issue #616).
+    - [FIX] Don't abort on receipt of STOP_SENDING in Ready state (issue #658).
+    - [FIX] Fix FIU linking.
+
+2026-06-28
+    - 4.8.2
+    - [FIX] Reject HTTP messages with multiple conflicting content-length
+      fields.
+    - [FIX] Use ls-qpack v2.6.5 to pick up a fix for a latent use-after-free.
+    - [IMPROVEMENT] Handle unexpected stream readv/writev args correctly.
+    - [DOCS] Update docs about the now-defunct push promises.
+
+2026-06-20
+    - 4.8.1
+    - [FIX] Send controller: bytes-scheduled underflow (issue #652).
+    - [FIX] Enforce stream limit in RST_STREAM (issue #654).
+    - [FIX] Reject invalid Content-Length syntax.
+    - [IMPROVEMENT] Top-level cmake ASAN options.
+
+2026-06-15
+    - 4.8.0
+    - [API] Deprecate all gQUIC versions.
+    - [FIX] http1x: check size of Cookie: header.
+    - [FIX] Add checks to gQUIC client session resume code.
+    - [FIX] 32-bit parser bounds checks.
+    - [FIX] Use ls-qpack v2.6.3 to pick up a bunch of fixes.
+    - [DOCS] FAQ: example programs do work with google.com etc.
+
+2026-06-05
+    - 4.7.2
+    - [FIX] Only ignore Priority: header after PRIORITY_UPDATE and in
+      client mode.
+    - [FIX] Transport params: reject partial preferred address families.
+    - [IMPROVEMENT] PRIORITY_UPDATE frame handling.
+
+2026-05-25
+    - 4.7.1
+    - [FIX] Content-length check in QPACK decoder handler.
+    - [FIX] HTTP/1.x module: stricter validation for field names and values.
+    - [FIX] Sample tools: fix recvmmsg receive batching (issue #434).
+    - [FIX] crypto object ownership on promotion failure.
+    - [IMPROVEMENT] Use ls-hpack v2.3.5.
+
 2026-05-16
     - 4.7.0
     - [IMPROVEMENT, API] Refactor: drop mini-conn promotion shortcut.
