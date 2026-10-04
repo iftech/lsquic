@@ -53,6 +53,7 @@ SET(TESTS
     http1x_if
     lsquic_hash
     mini_conn_delay
+    new_connection_id
     packet_out
     packet_resize
     packno_len

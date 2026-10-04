@@ -5006,9 +5006,13 @@ maybe_retire_dcid (struct ietf_full_conn *conn, const lsquic_cid_t *dcid)
                             && LSQUIC_CIDS_EQ(&(*dce)->de_cid, dcid))
             break;
 
-    assert(dce < DCES_END(conn));
-    if (dce < DCES_END(conn))
-        retire_dcid(conn, dce);
+    if (dce == DCES_END(conn))
+    {
+        ABORT_ERROR("cannot find assigned DCID to retire");
+        return;
+    }
+
+    retire_dcid(conn, dce);
 }
 
 
@@ -6142,6 +6146,13 @@ insert_new_dcid (struct ietf_full_conn *conn, uint64_t seqno,
                 else
                 {
                     LSQ_DEBUG("Ignore duplicate CID seqno %"PRIu64, seqno);
+                    if (update_cur_dcid)
+                    {
+                        *CUR_DCID(conn) = (*el)->de_cid;
+                        (*el)->de_flags |= DE_ASSIGNED;
+                        if (CUR_CPATH(conn)->cop_flags & COP_SPIN_BIT)
+                            CUR_CPATH(conn)->cop_spin_bit = 0;
+                    }
                     return 0;
                 }
             }
@@ -6187,6 +6198,7 @@ insert_new_dcid (struct ietf_full_conn *conn, uint64_t seqno,
         if (update_cur_dcid)
         {
             *CUR_DCID(conn) = *cid;
+            (*dce)->de_flags |= DE_ASSIGNED;
             if (CUR_CPATH(conn)->cop_flags & COP_SPIN_BIT)
                 CUR_CPATH(conn)->cop_spin_bit = 0;
         }
@@ -9869,6 +9881,65 @@ lsquic_ietf_full_conn_test_stop_sending_critical (unsigned results[4])
 
 
 #ifndef NDEBUG
+static void
+test_new_connection_id (int duplicate)
+{
+    struct ietf_full_conn conn;
+    struct dcid_elem old_dce, *replacement_dce;
+    struct lsquic_mm mm;
+    const lsquic_cid_t old_cid = { .len = 1, .idbuf = { 0xA0, }, };
+    const lsquic_cid_t replacement_cid = { .len = 1,
+                                            .idbuf = { 0xB0, }, };
+    unsigned char frame[] = { 0x18, 1, 1, 1, 0xB0,
+                              0, 0, 0, 0, 0, 0, 0, 0,
+                              0, 0, 0, 0, 0, 0, 0, 0, };
+    unsigned i;
+
+    memset(&conn, 0, sizeof(conn));
+    memset(&old_dce, 0, sizeof(old_dce));
+    memset(&mm, 0, sizeof(mm));
+    assert(0 == lsquic_mm_init(&mm));
+    TAILQ_INIT(&conn.ifc_to_retire);
+
+    conn.ifc_conn.cn_pf = select_pf_by_ver(LSQVER_I001);
+    conn.ifc_pub.mm = &mm;
+    conn.ifc_paths[0].cop_path.np_dcid = old_cid;
+    old_dce.de_cid = old_cid;
+    old_dce.de_flags = DE_ASSIGNED;
+    conn.ifc_dces[0] = &old_dce;
+
+    if (duplicate)
+        frame[2] = 0;
+    assert(sizeof(frame) == process_new_connection_id_frame(&conn, NULL,
+                                                    frame, sizeof(frame)));
+    if (duplicate)
+    {
+        frame[2] = 1;
+        assert(sizeof(frame) == process_new_connection_id_frame(&conn, NULL,
+                                                    frame, sizeof(frame)));
+    }
+
+    replacement_dce = NULL;
+    for (i = 0; i < MAX_IETF_CONN_DCIDS; ++i)
+        if (conn.ifc_dces[i])
+            replacement_dce = conn.ifc_dces[i];
+    assert(LSQUIC_CIDS_EQ(CUR_DCID(&conn), &replacement_cid));
+    assert(replacement_dce);
+    assert(replacement_dce->de_flags & DE_ASSIGNED);
+
+    maybe_retire_dcid(&conn, CUR_DCID(&conn));
+    lsquic_mm_cleanup(&mm);
+}
+
+
+void
+lsquic_ietf_full_conn_test_new_connection_id (void)
+{
+    test_new_connection_id(0);
+    test_new_connection_id(1);
+}
+
+
 void
 lsquic_ietf_full_conn_test_conn_close (unsigned results[13])
 {
@@ -9957,4 +10028,3 @@ lsquic_ietf_full_conn_test_conn_close (unsigned results[13])
 
 
 typedef char dcid_elem_fits_in_128_bytes[sizeof(struct dcid_elem) <= 128 ? 1 : - 1];
-
