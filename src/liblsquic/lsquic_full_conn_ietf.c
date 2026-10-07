@@ -736,7 +736,15 @@ path_chal_alarm_expired (enum alarm_id al_id, void *ctx,
     const unsigned path_id = al_id - AL_PATH_CHAL;
     struct conn_path *const copath = &conn->ifc_paths[path_id];
 
-    if (copath->cop_n_chals < sizeof(copath->cop_path_chals)
+    if (!(copath->cop_flags & COP_VALIDATED)
+                            && conn->ifc_cur_path_id != path_id)
+    {
+        LSQ_INFO("path #%u failed validation", path_id);
+        lsquic_send_ctl_cancel_path_verification(&conn->ifc_send_ctl,
+                                                        &copath->cop_path);
+        wipe_path(conn, path_id);
+    }
+    else if (copath->cop_n_chals < sizeof(copath->cop_path_chals)
                                         / sizeof(copath->cop_path_chals[0]))
     {
         LSQ_DEBUG("path #%u challenge expired, schedule another one", path_id);
@@ -4608,10 +4616,9 @@ generate_path_chal_frame (struct ietf_full_conn *conn, lsquic_time_t now,
      *  (confirmed path or incoming packet >= 400 bytes). */
     if (copath->cop_flags & COP_ALLOW_MTU_PADDING)
         maybe_pad_packet(conn, packet_out);
-    /* Only retry for confirmed path */
-    if (copath->cop_flags & COP_VALIDATED)
-        lsquic_alarmset_set(&conn->ifc_alset, AL_PATH_CHAL + path_id,
-                    now + (INITIAL_CHAL_TIMEOUT << (copath->cop_n_chals - 1)));
+    /* Reclaim an unvalidated path if its first challenge times out. */
+    lsquic_alarmset_set(&conn->ifc_alset, AL_PATH_CHAL + path_id,
+                now + (INITIAL_CHAL_TIMEOUT << (copath->cop_n_chals - 1)));
 }
 
 
@@ -8849,7 +8856,7 @@ ietf_full_conn_ci_record_addrs (struct lsquic_conn *lconn, void *peer_ctx,
 {
     struct ietf_full_conn *conn = (struct ietf_full_conn *) lconn;
     struct network_path *path;
-    struct conn_path *copath, *first_unused;
+    struct conn_path *copath, *first_unused, *first_retired;
     unsigned path_id;
 
     path = &conn->ifc_paths[conn->ifc_cur_path_id].cop_path;
@@ -8860,6 +8867,7 @@ ietf_full_conn_ci_record_addrs (struct lsquic_conn *lconn, void *peer_ctx,
     }
 
     first_unused = NULL;
+    first_retired = NULL;
     for (copath = conn->ifc_paths; copath < conn->ifc_paths + N_PATHS;
                                                                     ++copath)
     {
@@ -8871,9 +8879,21 @@ ietf_full_conn_ci_record_addrs (struct lsquic_conn *lconn, void *peer_ctx,
                 copath->cop_path.np_peer_ctx = peer_ctx;
                 return path_id;
             }
+            if (!first_retired && path_id != conn->ifc_cur_path_id
+                && (conn->ifc_used_paths & (1 << path_id))
+                && (copath->cop_flags & COP_RETIRED))
+                first_retired = copath;
         }
         else if (!first_unused)
             first_unused = copath;
+    }
+
+    if (!first_unused && first_retired)
+    {
+        path_id = first_retired - conn->ifc_paths;
+        LSQ_DEBUG("reclaim retired path ID %u", path_id);
+        wipe_path(conn, path_id);
+        first_unused = first_retired;
     }
 
     if (!first_unused)
@@ -10126,6 +10146,7 @@ lsquic_ietf_full_conn_test_path (void)
     assert(lsquic_sockaddr_eq(NP_PEER_SA(&conn.ifc_paths[1].cop_path),
                                             (struct sockaddr *) &peer_b));
 
+    conn.ifc_flags = 0;
     conn.ifc_used_paths = (1 << N_PATHS) - 1;
     path_id = ietf_full_conn_ci_record_addrs(&conn.ifc_conn, NULL,
                     (struct sockaddr *) &local, (struct sockaddr *) &peer_a);
@@ -10135,6 +10156,18 @@ lsquic_ietf_full_conn_test_path (void)
                     (struct sockaddr *) &local, (struct sockaddr *) &peer_a);
     assert(path_id == N_PATHS);
     assert(conn.ifc_used_paths == (1 << N_PATHS) - 1);
+
+    conn.ifc_paths[1].cop_flags |= COP_RETIRED;
+    path_id = ietf_full_conn_ci_record_addrs(&conn.ifc_conn, (void *) 2,
+                    (struct sockaddr *) &local, (struct sockaddr *) &peer_a);
+    assert(path_id == 1);
+    assert(conn.ifc_cur_path_id == 0);
+    assert(conn.ifc_used_paths == (((1 << N_PATHS) - 1) & ~(1 << 1)));
+    assert(conn.ifc_pending_paths == (1 << 1));
+    assert(!(conn.ifc_paths[1].cop_flags & COP_RETIRED));
+    assert(conn.ifc_paths[1].cop_path.np_peer_ctx == (void *) 2);
+    assert(lsquic_sockaddr_eq(NP_PEER_SA(&conn.ifc_paths[1].cop_path),
+                                            (struct sockaddr *) &peer_a));
 }
 
 

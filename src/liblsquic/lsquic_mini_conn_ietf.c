@@ -1565,6 +1565,14 @@ imico_maybe_delay_processing (struct ietf_mini_conn *conn,
 }
 
 
+static int
+imico_may_validate_path (const struct ietf_mini_conn *conn)
+{
+    return !(conn->imc_flags & (IMC_ADDR_VALIDATED | IMC_PATH_CHANGED
+                                                | IMC_PENDING_PATH));
+}
+
+
 /* [RFC 9000] Section 8.1 (Address Validation During Connection Establishment):
  " Additionally, a server MAY consider the client address validated if
  " the client uses a connection ID chosen by the server and the
@@ -1708,7 +1716,7 @@ ietf_mini_conn_ci_packet_in (struct lsquic_conn *lconn,
         return;
     }
 
-    if (!(conn->imc_flags & (IMC_ADDR_VALIDATED | IMC_PATH_CHANGED)))
+    if (imico_may_validate_path(conn))
         imico_maybe_validate_by_dcid(conn, &packet_in->pi_dcid);
 
     pns = lsquic_hety2pns[ packet_in->pi_header_type ];
@@ -1779,7 +1787,7 @@ ietf_mini_conn_ci_packet_in (struct lsquic_conn *lconn,
             imico_discard_pending_path(conn);
             return;
         }
-        if (!(conn->imc_flags & (IMC_ADDR_VALIDATED | IMC_PATH_CHANGED)))
+        if (imico_may_validate_path(conn))
             imico_peer_addr_validated(conn, "handshake PNS");
     }
 
@@ -2570,6 +2578,15 @@ lsquic_ietf_mini_conn_test_path (void)
 
     ietf_mini_conn_ci_record_addrs(&conn.imc_conn, (void *) 1,
                     (struct sockaddr *) &local, (struct sockaddr *) &peer_a);
+    assert(imico_may_validate_path(&conn));
+    ietf_mini_conn_ci_record_addrs(&conn.imc_conn, (void *) 2,
+                    (struct sockaddr *) &local, (struct sockaddr *) &peer_b);
+    assert(conn.imc_flags & IMC_PENDING_PATH);
+    assert(!imico_may_validate_path(&conn));
+    imico_discard_pending_path(&conn);
+    assert(!(conn.imc_flags & IMC_PENDING_PATH));
+    assert(imico_may_validate_path(&conn));
+
     conn.imc_flags |= IMC_ADDR_VALIDATED;
     ietf_mini_conn_ci_record_addrs(&conn.imc_conn, (void *) 2,
                     (struct sockaddr *) &local, (struct sockaddr *) &peer_b);
