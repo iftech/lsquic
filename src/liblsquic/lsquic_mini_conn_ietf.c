@@ -2477,7 +2477,6 @@ static void
 imico_commit_pending_path (struct ietf_mini_conn *conn)
 {
     struct lsquic_packet_out *packet_out;
-    size_t local_len, peer_len;
     char path_str[4][INET6_ADDRSTRLEN + sizeof(":65535")];
 
     if (!(conn->imc_flags & IMC_PENDING_PATH))
@@ -2495,15 +2494,10 @@ imico_commit_pending_path (struct ietf_mini_conn *conn)
         SA2STR(NP_LOCAL_SA(&conn->imc_pending_path), path_str[2]),
         SA2STR(NP_PEER_SA(&conn->imc_pending_path), path_str[3]));
 
-    local_len = NP_LOCAL_SA(&conn->imc_pending_path)->sa_family == AF_INET
-                ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
-    peer_len = NP_PEER_SA(&conn->imc_pending_path)->sa_family == AF_INET
-                ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
-    memcpy(conn->imc_path.np_peer_addr,
-                            conn->imc_pending_path.np_peer_addr, peer_len);
-    memcpy(conn->imc_path.np_local_addr,
-                            conn->imc_pending_path.np_local_addr, local_len);
-    conn->imc_path.np_peer_ctx = conn->imc_pending_path.np_peer_ctx;
+    imico_record_path_addrs(&conn->imc_path,
+                            conn->imc_pending_path.np_peer_ctx,
+                            NP_LOCAL_SA(&conn->imc_pending_path),
+                            NP_PEER_SA(&conn->imc_pending_path));
     conn->imc_flags = (conn->imc_flags
                     & ~(IMC_ADDR_VALIDATED|IMC_PENDING_PATH)) | IMC_PATH_CHANGED;
 }

@@ -7362,7 +7362,6 @@ process_regular_packet (struct ietf_full_conn *conn,
         if (conn->ifc_pending_paths & (1 << packet_in->pi_path_id))
         {
             LSQ_DEBUG("ignore Retry packet from a new path");
-            discard_pending_path(conn, packet_in->pi_path_id);
             return 0;
         }
         else
@@ -7380,7 +7379,6 @@ process_regular_packet (struct ietf_full_conn *conn,
             pns == PNS_INIT ? "Initial" : "Handshake");
         EV_LOG_CONN_EVENT(LSQUIC_LOG_CONN_ID, "ignore %s packet",
                                                         lsquic_pns2str[pns]);
-        discard_pending_path(conn, packet_in->pi_path_id);
         return 0;
     }
 
@@ -7416,7 +7414,6 @@ process_regular_packet (struct ietf_full_conn *conn,
                 break;
             }
             LSQ_DEBUG("ignore packet from unknown server address");
-            discard_pending_path(conn, packet_in->pi_path_id);
             return 0;
         }
     }
@@ -7445,7 +7442,6 @@ process_regular_packet (struct ietf_full_conn *conn,
             {
                 LSQ_INFO("received stateless reset packet: aborting connection");
                 conn->ifc_flags |= IFC_GOT_PRST;
-                discard_pending_path(conn, packet_in->pi_path_id);
                 return -1;
             }
             else if (dec_packin == DECPI_BADCRYPT)
@@ -7453,24 +7449,20 @@ process_regular_packet (struct ietf_full_conn *conn,
                 CONN_STATS(in.undec_packets, 1);
                 LSQ_INFO("could not decrypt packet (type %s)",
                                     lsquic_hety2str[packet_in->pi_header_type]);
-                discard_pending_path(conn, packet_in->pi_path_id);
                 return 0;
             }
             else
             {
                 CONN_STATS(in.undec_packets, 1);
                 LSQ_INFO("packet is too short to be decrypted");
-                discard_pending_path(conn, packet_in->pi_path_id);
                 return 0;
             }
         case DECPI_NOT_YET:
         case DECPI_NOMEM:
-            discard_pending_path(conn, packet_in->pi_path_id);
             return 0;
         case DECPI_VIOLATION:
             ABORT_QUIETLY(0, TEC_PROTOCOL_VIOLATION,
                                     "decrypter reports protocol violation");
-            discard_pending_path(conn, packet_in->pi_path_id);
             return -1;
         case DECPI_OK:
             /* Receiving any other type of packet precludes subsequent retries.
@@ -7496,7 +7488,6 @@ process_regular_packet (struct ietf_full_conn *conn,
             {
                 ABORT_QUIETLY(0, TEC_PROTOCOL_VIOLATION,
                             "protocol violation detected bad dcid");
-                discard_pending_path(conn, packet_in->pi_path_id);
                 return -1;
             }
         }
@@ -7631,7 +7622,6 @@ process_regular_packet (struct ietf_full_conn *conn,
     case REC_ST_DUP:
         CONN_STATS(in.dup_packets, 1);
         LSQ_INFO("packet %"PRIu64" is a duplicate", packet_in->pi_packno);
-        discard_pending_path(conn, packet_in->pi_path_id);
         return 0;
     default:
         assert(0);
@@ -7639,7 +7629,6 @@ process_regular_packet (struct ietf_full_conn *conn,
     case REC_ST_ERR:
         CONN_STATS(in.err_packets, 1);
         LSQ_INFO("error processing packet %"PRIu64, packet_in->pi_packno);
-        discard_pending_path(conn, packet_in->pi_path_id);
         return -1;
     }
 }
@@ -7688,7 +7677,6 @@ process_incoming_packet_verneg (struct ietf_full_conn *conn,
     if (conn->ifc_pending_paths & (1 << packet_in->pi_path_id))
     {
         LSQ_DEBUG("ignore version-negotiation packet from a new path");
-        discard_pending_path(conn, packet_in->pi_path_id);
         return 0;
     }
 
@@ -7831,8 +7819,8 @@ ietf_full_conn_ci_packet_in (struct lsquic_conn *lconn,
         if (0 != conn->ifc_process_incoming_packet(conn, packet_in))
             conn->ifc_flags |= IFC_ERROR;
     }
-    else
-        discard_pending_path(conn, packet_in->pi_path_id);
+    /* Accepted packets commit their path; discard any uncommitted slot. */
+    discard_pending_path(conn, packet_in->pi_path_id);
 }
 
 
@@ -10093,7 +10081,8 @@ lsquic_ietf_full_conn_test_path (void)
     struct ietf_full_conn conn;
     struct conn_path *copath;
     struct sockaddr_in local, peer_a, peer_b;
-    unsigned path_id;
+    struct lsquic_packet_in packet_in;
+    unsigned path_id, i;
 
     memset(&conn, 0, sizeof(conn));
     conn.ifc_used_paths = 1 << 0;
@@ -10134,14 +10123,36 @@ lsquic_ietf_full_conn_test_path (void)
     assert(lsquic_sockaddr_eq(NP_PEER_SA(&conn.ifc_paths[0].cop_path),
                                             (struct sockaddr *) &peer_a));
 
-    discard_pending_path(&conn, path_id);
-    assert(conn.ifc_pending_paths == 0);
-    assert(conn.ifc_used_paths == (1 << 0));
+    memset(&packet_in, 0, sizeof(packet_in));
+    packet_in.pi_header_type = HETY_RETRY;
+    for (i = 0; i < 3; ++i)
+    {
+        conn.ifc_flags = i == 0 ? IFC_ERROR : IFC_SERVER;
+        if (i == 1)
+            conn.ifc_process_incoming_packet = process_incoming_packet_verneg;
+        else
+            conn.ifc_process_incoming_packet = process_regular_packet;
+        packet_in.pi_path_id = ietf_full_conn_ci_record_addrs(&conn.ifc_conn,
+                    (void *) 1, (struct sockaddr *) &local,
+                    (struct sockaddr *) &peer_b);
+        assert(packet_in.pi_path_id == 1);
+        ietf_full_conn_ci_packet_in(&conn.ifc_conn, &packet_in);
+        assert(conn.ifc_pending_paths == 0);
+        assert(conn.ifc_used_paths == (1 << 0));
+        assert(conn.ifc_paths[1].cop_path.np_path_id == 1);
+        assert(NP_PEER_SA(&conn.ifc_paths[1].cop_path)->sa_family == 0);
+    }
 
     path_id = ietf_full_conn_ci_record_addrs(&conn.ifc_conn, (void *) 1,
                     (struct sockaddr *) &local, (struct sockaddr *) &peer_b);
     commit_pending_path(&conn, path_id);
     assert(conn.ifc_pending_paths == 0);
+    assert(conn.ifc_used_paths == ((1 << 0) | (1 << 1)));
+    assert(lsquic_sockaddr_eq(NP_PEER_SA(&conn.ifc_paths[1].cop_path),
+                                            (struct sockaddr *) &peer_b));
+
+    conn.ifc_flags = IFC_ERROR;
+    ietf_full_conn_ci_packet_in(&conn.ifc_conn, &packet_in);
     assert(conn.ifc_used_paths == ((1 << 0) | (1 << 1)));
     assert(lsquic_sockaddr_eq(NP_PEER_SA(&conn.ifc_paths[1].cop_path),
                                             (struct sockaddr *) &peer_b));

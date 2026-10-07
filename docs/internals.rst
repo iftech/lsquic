@@ -2525,6 +2525,12 @@ ID is stored in ``ifc_cur_path_id``.  The engine assigns this value to
 the newly created incoming packet (in ``pi_path_id``).  The packet is
 then passed to ``ci_packet_in()``.
 
+In full IETF connections, a newly observed path remains in
+``ifc_pending_paths`` until packet processing accepts it into receive history.
+Acceptance moves it to ``ifc_used_paths``.  At the end of ``ci_packet_in()``,
+any still-pending slot for that packet is discarded, including when the
+connection is already closing.  Existing committed paths are preserved.
+
 The first part of the path-switching logic is in ``process_regular_packet()``:
 
 ::
