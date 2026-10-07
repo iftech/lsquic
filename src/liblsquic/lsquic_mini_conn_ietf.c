@@ -50,6 +50,12 @@ static const struct conn_iface mini_conn_ietf_iface;
 static unsigned highest_bit_set (unsigned long long);
 
 static void
+imico_discard_pending_path (struct ietf_mini_conn *);
+
+static void
+imico_commit_pending_path (struct ietf_mini_conn *);
+
+static void
 ietf_mini_conn_ci_abort_error (struct lsquic_conn *lconn, int is_app,
                                 unsigned error_code, const char *fmt, ...);
 
@@ -1698,6 +1704,7 @@ ietf_mini_conn_ci_packet_in (struct lsquic_conn *lconn,
     if (conn->imc_flags & IMC_ERROR)
     {
         LSQ_DEBUG("ignore incoming packet: connection is in error state");
+        imico_discard_pending_path(conn);
         return;
     }
 
@@ -1710,6 +1717,7 @@ ietf_mini_conn_ci_packet_in (struct lsquic_conn *lconn,
         if (conn->imc_flags & IMC_IGNORE_INIT)
         {
             LSQ_DEBUG("ignore init packet");    /* Don't bother decrypting */
+            imico_discard_pending_path(conn);
             return;
         }
         if (packet_in->pi_pkt_size
@@ -1717,6 +1725,7 @@ ietf_mini_conn_ci_packet_in (struct lsquic_conn *lconn,
         {
             LSQ_DEBUG("ignore init packet smaller than minimum size required");
             /* Don't bother decrypting */
+            imico_discard_pending_path(conn);
             return;
         }
     }
@@ -1730,9 +1739,13 @@ ietf_mini_conn_ci_packet_in (struct lsquic_conn *lconn,
     case DECPI_VIOLATION:
         ietf_mini_conn_ci_abort_error(lconn, 0, TEC_PROTOCOL_VIOLATION,
                     "protocol violation detected while decrypting packet");
+        imico_discard_pending_path(conn);
         return;
     case DECPI_NOT_YET:
-        imico_maybe_delay_processing(conn, packet_in);
+        if (!(conn->imc_flags & IMC_PENDING_PATH))
+            imico_maybe_delay_processing(conn, packet_in);
+        else
+            imico_discard_pending_path(conn);
         return;
     case DECPI_BADCRYPT:
         if (packet_in->pi_flags & PI_FIRST_INIT)
@@ -1745,6 +1758,7 @@ ietf_mini_conn_ci_packet_in (struct lsquic_conn *lconn,
         //fall through
     default:
         LSQ_DEBUG("could not decrypt packet");
+        imico_discard_pending_path(conn);
         return;
     }
 
@@ -1752,6 +1766,7 @@ ietf_mini_conn_ci_packet_in (struct lsquic_conn *lconn,
 
     if (pns == PNS_APP)
     {
+        imico_commit_pending_path(conn);
         imico_maybe_delay_processing(conn, packet_in);
         return;
     }
@@ -1761,6 +1776,7 @@ ietf_mini_conn_ci_packet_in (struct lsquic_conn *lconn,
         {
             ietf_mini_conn_ci_abort_error(lconn, 0, TEC_PROTOCOL_VIOLATION,
                     "protocol violation detected bad dcid for HSK pns");
+            imico_discard_pending_path(conn);
             return;
         }
         if (!(conn->imc_flags & (IMC_ADDR_VALIDATED | IMC_PATH_CHANGED)))
@@ -1780,14 +1796,20 @@ ietf_mini_conn_ci_packet_in (struct lsquic_conn *lconn,
                                     && !(conn->imc_flags & IMC_TRECHIST))
     {
         if (0 != imico_switch_to_trechist(conn))
+        {
+            imico_discard_pending_path(conn);
             return;
+        }
     }
 
     if (imico_received_packet_is_dup(conn, pns, packet_in->pi_packno))
     {
         LSQ_DEBUG("duplicate packet %"PRIu64, packet_in->pi_packno);
+        imico_discard_pending_path(conn);
         return;
     }
+
+    imico_commit_pending_path(conn);
 
     /* Update receive history before processing the packet: if there is an
      * error, the connection is terminated and recording this packet number
@@ -2420,43 +2442,89 @@ ietf_mini_conn_ci_get_path (struct lsquic_conn *lconn,
 }
 
 
+static void
+imico_record_path_addrs (struct network_path *path, void *peer_ctx,
+            const struct sockaddr *local_sa, const struct sockaddr *peer_sa)
+{
+    size_t len;
+
+    len = local_sa->sa_family == AF_INET ? sizeof(struct sockaddr_in)
+                                                : sizeof(struct sockaddr_in6);
+    memcpy(path->np_peer_addr, peer_sa, len);
+    memcpy(path->np_local_addr, local_sa, len);
+    path->np_peer_ctx = peer_ctx;
+}
+
+
+static void
+imico_discard_pending_path (struct ietf_mini_conn *conn)
+{
+    conn->imc_flags &= ~IMC_PENDING_PATH;
+}
+
+
+static void
+imico_commit_pending_path (struct ietf_mini_conn *conn)
+{
+    struct lsquic_packet_out *packet_out;
+    size_t len;
+    char path_str[4][INET6_ADDRSTRLEN + sizeof(":65535")];
+
+    if (!(conn->imc_flags & IMC_PENDING_PATH))
+        return;
+
+    if (NP_IS_IPv6(&conn->imc_path)
+                        != NP_IS_IPv6(&conn->imc_pending_path))
+        TAILQ_FOREACH(packet_out, &conn->imc_packets_out, po_next)
+            if ((packet_out->po_flags & (PO_SENT|PO_ENCRYPTED)) == PO_ENCRYPTED)
+                imico_return_enc_data(conn, packet_out);
+
+    LSQ_DEBUG("path changed from (%s - %s) to (%s - %s)",
+        SA2STR(NP_LOCAL_SA(&conn->imc_path), path_str[0]),
+        SA2STR(NP_PEER_SA(&conn->imc_path), path_str[1]),
+        SA2STR(NP_LOCAL_SA(&conn->imc_pending_path), path_str[2]),
+        SA2STR(NP_PEER_SA(&conn->imc_pending_path), path_str[3]));
+
+    len = NP_LOCAL_SA(&conn->imc_pending_path)->sa_family == AF_INET
+                ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
+    memcpy(conn->imc_path.np_peer_addr,
+                                conn->imc_pending_path.np_peer_addr, len);
+    memcpy(conn->imc_path.np_local_addr,
+                                conn->imc_pending_path.np_local_addr, len);
+    conn->imc_path.np_peer_ctx = conn->imc_pending_path.np_peer_ctx;
+    conn->imc_flags = (conn->imc_flags
+                    & ~(IMC_ADDR_VALIDATED|IMC_PENDING_PATH)) | IMC_PATH_CHANGED;
+}
+
+
 static unsigned char
 ietf_mini_conn_ci_record_addrs (struct lsquic_conn *lconn, void *peer_ctx,
             const struct sockaddr *local_sa, const struct sockaddr *peer_sa)
 {
     struct ietf_mini_conn *conn = (struct ietf_mini_conn *) lconn;
     const struct sockaddr *orig_peer_sa;
-    struct lsquic_packet_out *packet_out;
-    size_t len;
-    char path_str[4][INET6_ADDRSTRLEN + sizeof(":65535")];
-
-    if (NP_IS_IPv6(&conn->imc_path) != (AF_INET6 == peer_sa->sa_family))
-        TAILQ_FOREACH(packet_out, &conn->imc_packets_out, po_next)
-            if ((packet_out->po_flags & (PO_SENT|PO_ENCRYPTED)) == PO_ENCRYPTED)
-                imico_return_enc_data(conn, packet_out);
+    char path_str[2][INET6_ADDRSTRLEN + sizeof(":65535")];
 
     orig_peer_sa = NP_PEER_SA(&conn->imc_path);
     if (orig_peer_sa->sa_family == 0)
+    {
         LSQ_DEBUG("connection to %s from %s", SA2STR(local_sa, path_str[0]),
                                                 SA2STR(peer_sa, path_str[1]));
-    else if (!(lsquic_sockaddr_eq(NP_PEER_SA(&conn->imc_path), peer_sa)
-              && lsquic_sockaddr_eq(NP_LOCAL_SA(&conn->imc_path), local_sa)))
-    {
-        LSQ_DEBUG("path changed from (%s - %s) to (%s - %s)",
-            SA2STR(NP_LOCAL_SA(&conn->imc_path), path_str[0]),
-            SA2STR(NP_PEER_SA(&conn->imc_path), path_str[1]),
-            SA2STR(local_sa, path_str[2]),
-            SA2STR(peer_sa, path_str[3]));
-        conn->imc_flags = (conn->imc_flags & ~IMC_ADDR_VALIDATED)
-                            | IMC_PATH_CHANGED;
+        imico_record_path_addrs(&conn->imc_path, peer_ctx, local_sa, peer_sa);
+        imico_discard_pending_path(conn);
     }
-
-    len = local_sa->sa_family == AF_INET ? sizeof(struct sockaddr_in)
-                                                : sizeof(struct sockaddr_in6);
-
-    memcpy(conn->imc_path.np_peer_addr, peer_sa, len);
-    memcpy(conn->imc_path.np_local_addr, local_sa, len);
-    conn->imc_path.np_peer_ctx = peer_ctx;
+    else if (lsquic_sockaddr_eq(NP_PEER_SA(&conn->imc_path), peer_sa)
+              && lsquic_sockaddr_eq(NP_LOCAL_SA(&conn->imc_path), local_sa))
+    {
+        conn->imc_path.np_peer_ctx = peer_ctx;
+        imico_discard_pending_path(conn);
+    }
+    else
+    {
+        imico_record_path_addrs(&conn->imc_pending_path, peer_ctx, local_sa,
+                                                                    peer_sa);
+        conn->imc_flags |= IMC_PENDING_PATH;
+    }
     return 0;
 }
 
@@ -2470,6 +2538,57 @@ ietf_mini_conn_ci_count_garbage (struct lsquic_conn *lconn, size_t garbage_sz)
     conn->imc_flags &= ~IMC_AMP_CAPPED;
     LSQ_DEBUG("count %zd bytes of garbage, new value: %u bytes", garbage_sz,
         conn->imc_bytes_in);
+}
+
+
+
+
+void
+lsquic_ietf_mini_conn_test_path (void)
+{
+    struct ietf_mini_conn conn;
+    struct sockaddr_in local, peer_a, peer_b;
+
+    memset(&conn, 0, sizeof(conn));
+    TAILQ_INIT(&conn.imc_packets_out);
+    memset(&local, 0, sizeof(local));
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(0x7F000001);
+    local.sin_port = htons(443);
+    memset(&peer_a, 0, sizeof(peer_a));
+    peer_a.sin_family = AF_INET;
+    peer_a.sin_addr.s_addr = htonl(0x7F000002);
+    peer_a.sin_port = htons(1234);
+    memset(&peer_b, 0, sizeof(peer_b));
+    peer_b.sin_family = AF_INET;
+    peer_b.sin_addr.s_addr = htonl(0x7F000003);
+    peer_b.sin_port = htons(1234);
+
+    ietf_mini_conn_ci_record_addrs(&conn.imc_conn, (void *) 1,
+                    (struct sockaddr *) &local, (struct sockaddr *) &peer_a);
+    conn.imc_flags |= IMC_ADDR_VALIDATED;
+    ietf_mini_conn_ci_record_addrs(&conn.imc_conn, (void *) 2,
+                    (struct sockaddr *) &local, (struct sockaddr *) &peer_b);
+    assert(conn.imc_flags & IMC_PENDING_PATH);
+    assert(conn.imc_flags & IMC_ADDR_VALIDATED);
+    assert(lsquic_sockaddr_eq(NP_PEER_SA(&conn.imc_path),
+                                            (struct sockaddr *) &peer_a));
+
+    imico_discard_pending_path(&conn);
+    assert(!(conn.imc_flags & IMC_PENDING_PATH));
+    assert(conn.imc_flags & IMC_ADDR_VALIDATED);
+    assert(lsquic_sockaddr_eq(NP_PEER_SA(&conn.imc_path),
+                                            (struct sockaddr *) &peer_a));
+
+    ietf_mini_conn_ci_record_addrs(&conn.imc_conn, (void *) 2,
+                    (struct sockaddr *) &local, (struct sockaddr *) &peer_b);
+    imico_commit_pending_path(&conn);
+    assert(!(conn.imc_flags & IMC_PENDING_PATH));
+    assert(!(conn.imc_flags & IMC_ADDR_VALIDATED));
+    assert(conn.imc_flags & IMC_PATH_CHANGED);
+    assert(conn.imc_path.np_peer_ctx == (void *) 2);
+    assert(lsquic_sockaddr_eq(NP_PEER_SA(&conn.imc_path),
+                                            (struct sockaddr *) &peer_b));
 }
 
 

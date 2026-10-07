@@ -69,6 +69,7 @@ struct ietf_mini_conn
         IMC_TRECHIST            = 1 << 23,
         IMC_VER_NEG_FAILED      = 1 << 24,
         IMC_AMP_CAPPED          = 1 << 25,
+        IMC_PENDING_PATH        = 1 << 26,
     }                               imc_flags;
     struct mini_crypto_stream       imc_streams[N_ENC_LEVS];
     void                           *imc_stream_ps[N_ENC_LEVS];
@@ -118,6 +119,7 @@ struct ietf_mini_conn
     unsigned short                  imc_hello_pkt_remain;
     unsigned char                   imc_long_header_sz;
     struct network_path             imc_path;
+    struct network_path             imc_pending_path;
 };
 
 /* [RFC 9000] Section 7.5 (Cryptographic Message Buffering):
