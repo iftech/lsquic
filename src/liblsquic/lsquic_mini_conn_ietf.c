@@ -2446,12 +2446,14 @@ static void
 imico_record_path_addrs (struct network_path *path, void *peer_ctx,
             const struct sockaddr *local_sa, const struct sockaddr *peer_sa)
 {
-    size_t len;
+    size_t local_len, peer_len;
 
-    len = local_sa->sa_family == AF_INET ? sizeof(struct sockaddr_in)
+    local_len = local_sa->sa_family == AF_INET ? sizeof(struct sockaddr_in)
                                                 : sizeof(struct sockaddr_in6);
-    memcpy(path->np_peer_addr, peer_sa, len);
-    memcpy(path->np_local_addr, local_sa, len);
+    peer_len = peer_sa->sa_family == AF_INET ? sizeof(struct sockaddr_in)
+                                                : sizeof(struct sockaddr_in6);
+    memcpy(path->np_peer_addr, peer_sa, peer_len);
+    memcpy(path->np_local_addr, local_sa, local_len);
     path->np_peer_ctx = peer_ctx;
 }
 
@@ -2467,7 +2469,7 @@ static void
 imico_commit_pending_path (struct ietf_mini_conn *conn)
 {
     struct lsquic_packet_out *packet_out;
-    size_t len;
+    size_t local_len, peer_len;
     char path_str[4][INET6_ADDRSTRLEN + sizeof(":65535")];
 
     if (!(conn->imc_flags & IMC_PENDING_PATH))
@@ -2485,12 +2487,14 @@ imico_commit_pending_path (struct ietf_mini_conn *conn)
         SA2STR(NP_LOCAL_SA(&conn->imc_pending_path), path_str[2]),
         SA2STR(NP_PEER_SA(&conn->imc_pending_path), path_str[3]));
 
-    len = NP_LOCAL_SA(&conn->imc_pending_path)->sa_family == AF_INET
+    local_len = NP_LOCAL_SA(&conn->imc_pending_path)->sa_family == AF_INET
+                ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
+    peer_len = NP_PEER_SA(&conn->imc_pending_path)->sa_family == AF_INET
                 ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
     memcpy(conn->imc_path.np_peer_addr,
-                                conn->imc_pending_path.np_peer_addr, len);
+                            conn->imc_pending_path.np_peer_addr, peer_len);
     memcpy(conn->imc_path.np_local_addr,
-                                conn->imc_pending_path.np_local_addr, len);
+                            conn->imc_pending_path.np_local_addr, local_len);
     conn->imc_path.np_peer_ctx = conn->imc_pending_path.np_peer_ctx;
     conn->imc_flags = (conn->imc_flags
                     & ~(IMC_ADDR_VALIDATED|IMC_PENDING_PATH)) | IMC_PATH_CHANGED;
@@ -2589,6 +2593,35 @@ lsquic_ietf_mini_conn_test_path (void)
     assert(conn.imc_path.np_peer_ctx == (void *) 2);
     assert(lsquic_sockaddr_eq(NP_PEER_SA(&conn.imc_path),
                                             (struct sockaddr *) &peer_b));
+
+    {
+        struct sockaddr_in6 local_v6, peer_v6;
+
+        memset(&conn, 0, sizeof(conn));
+        TAILQ_INIT(&conn.imc_packets_out);
+        memset(&local_v6, 0, sizeof(local_v6));
+        local_v6.sin6_family = AF_INET6;
+        local_v6.sin6_port = htons(443);
+        local_v6.sin6_addr.s6_addr[15] = 1;
+        ietf_mini_conn_ci_record_addrs(&conn.imc_conn, NULL,
+                (struct sockaddr *) &local_v6, (struct sockaddr *) &peer_a);
+        assert(lsquic_sockaddr_eq(NP_LOCAL_SA(&conn.imc_path),
+                                        (struct sockaddr *) &local_v6));
+        assert(lsquic_sockaddr_eq(NP_PEER_SA(&conn.imc_path),
+                                            (struct sockaddr *) &peer_a));
+
+        memset(&peer_v6, 0, sizeof(peer_v6));
+        peer_v6.sin6_family = AF_INET6;
+        peer_v6.sin6_port = htons(1234);
+        peer_v6.sin6_addr.s6_addr[15] = 2;
+        ietf_mini_conn_ci_record_addrs(&conn.imc_conn, NULL,
+                (struct sockaddr *) &local, (struct sockaddr *) &peer_v6);
+        imico_commit_pending_path(&conn);
+        assert(lsquic_sockaddr_eq(NP_LOCAL_SA(&conn.imc_path),
+                                            (struct sockaddr *) &local));
+        assert(lsquic_sockaddr_eq(NP_PEER_SA(&conn.imc_path),
+                                        (struct sockaddr *) &peer_v6));
+    }
 }
 
 
