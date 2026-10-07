@@ -3356,6 +3356,20 @@ retire_cid_from_tp (struct ietf_full_conn *conn,
 }
 
 
+static struct conn_path *
+find_unused_path (struct ietf_full_conn *conn)
+{
+    struct conn_path *copath;
+
+    for (copath = conn->ifc_paths; copath < conn->ifc_paths + N_PATHS;
+                                                                    ++copath)
+        if (!(conn->ifc_used_paths & (1 << (copath - conn->ifc_paths))))
+            return copath;
+
+    return NULL;
+}
+
+
 static enum { BM_MIGRATING, BM_NOT_MIGRATING, BM_ERROR, }
 try_to_begin_migration (struct ietf_full_conn *conn,
                                         const struct transport_params *params)
@@ -3406,6 +3420,13 @@ try_to_begin_migration (struct ietf_full_conn *conn,
         return BM_NOT_MIGRATING;
     }
 
+    copath = find_unused_path(conn);
+    if (!copath)
+    {
+        LSQ_DEBUG("Cannot migrate: no unused path slot");
+        return BM_NOT_MIGRATING;
+    }
+
     dce = get_new_dce(conn);
     if (!dce)
     {
@@ -3445,9 +3466,6 @@ try_to_begin_migration (struct ietf_full_conn *conn,
         memcpy(&sockaddr.v4.sin_addr, params->tp_preferred_address.ipv4_addr,
                                                 sizeof(sockaddr.v4.sin_addr));
     }
-
-    copath = &conn->ifc_paths[1];
-    assert(!(conn->ifc_used_paths & (1 << (copath - conn->ifc_paths))));
 
     migra_begin(conn, copath, dce, (struct sockaddr *) &sockaddr, params);
     return BM_MIGRATING;
@@ -9937,6 +9955,26 @@ lsquic_ietf_full_conn_test_new_connection_id (void)
 {
     test_new_connection_id(0);
     test_new_connection_id(1);
+}
+
+
+void
+lsquic_ietf_full_conn_test_path (void)
+{
+    struct ietf_full_conn conn;
+    struct conn_path *copath;
+
+    memset(&conn, 0, sizeof(conn));
+    conn.ifc_used_paths = 1 << 0;
+    copath = find_unused_path(&conn);
+    assert(copath == &conn.ifc_paths[1]);
+
+    conn.ifc_used_paths |= 1 << 1;
+    copath = find_unused_path(&conn);
+    assert(copath == &conn.ifc_paths[2]);
+
+    conn.ifc_used_paths = (1 << N_PATHS) - 1;
+    assert(NULL == find_unused_path(&conn));
 }
 
 

@@ -57,6 +57,7 @@ SET(TESTS
     packet_out
     packet_resize
     packno_len
+    path
     parse_packet_in
     purga
     push_disabled
