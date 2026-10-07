@@ -139,12 +139,19 @@ lsquic_conn_get_server_cert_chain (struct lsquic_conn *lconn)
 
 
 struct stack_st_X509 *
-lsquic_conn_get_full_cert_chain (struct lsquic_conn *lconn)
+lsquic_conn_get_full_peer_cert_chain (struct lsquic_conn *lconn)
 {
     if (lconn->cn_enc_session)
-        return lconn->cn_esf_c->esf_get_full_cert_chain(lconn->cn_enc_session);
+        return lconn->cn_esf_c->esf_get_full_peer_cert_chain(lconn->cn_enc_session);
     else
         return NULL;
+}
+
+
+struct stack_st_X509 *
+lsquic_conn_get_full_cert_chain (struct lsquic_conn *lconn)
+{
+    return lsquic_conn_get_full_peer_cert_chain(lconn);
 }
 
 
@@ -323,9 +330,9 @@ lsquic_conn_stats_diff (const struct conn_stats *cumulative_stats,
                         const struct conn_stats *previous_stats,
                         struct conn_stats *new_stats)
 {
-    const unsigned long *const cum = (void *) cumulative_stats,
+    const uint64_t *const cum = (void *) cumulative_stats,
                         *const prev = (void *) previous_stats;
-    unsigned long *const new = (void *) new_stats;
+    uint64_t *const new = (void *) new_stats;
     unsigned i;
 
     for (i = 0; i < sizeof(*new_stats) / sizeof(new[0]); ++i)
@@ -379,4 +386,3 @@ lsquic_conn_get_param (lsquic_conn_t *lconn, enum lsquic_conn_param param,
         return lconn->cn_if->ci_get_param(lconn, param, value, value_len);
     return -1;
 }
-

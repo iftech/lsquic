@@ -26,8 +26,8 @@ extern "C" {
 #endif
 
 #define LSQUIC_MAJOR_VERSION 4
-#define LSQUIC_MINOR_VERSION 9
-#define LSQUIC_PATCH_VERSION 4
+#define LSQUIC_MINOR_VERSION 10
+#define LSQUIC_PATCH_VERSION 0
 
 #define LSQUIC_QUOTE(x)     #x
 #define LSQUIC_SVAL(v)      LSQUIC_QUOTE(v)
@@ -165,6 +165,9 @@ enum lsquic_hsk_status
 struct lsquic_stream_if {
 
     /**
+     * Called when a new connection is created.  In server mode, the handshake
+     * has succeeded.  In client mode, the handshake has not yet completed.
+     *
      * Use @ref lsquic_conn_get_ctx to get back the context.  It is
      * OK for this function to return NULL.
      */
@@ -197,9 +200,10 @@ struct lsquic_stream_if {
      * is called during lsquic_engine_packet_in().
      */
     void (*on_datagram)(lsquic_conn_t *, const void *buf, size_t);
-    /* This callback in only called in client mode */
     /**
-     * When handshake is completed, this optional callback is called.
+     * This optional callback is called only in client mode when the handshake
+     * completes, successfully or unsuccessfully.  In server mode, on_new_conn
+     * indicates a successful handshake.
      */
     void (*on_hsk_done)(lsquic_conn_t *c, enum lsquic_hsk_status s);
     /**
@@ -340,6 +344,7 @@ typedef struct ssl_ctx_st * (*lsquic_lookup_cert_f)(
 #define LSQUIC_DF_STTL               86400
 #define LSQUIC_DF_MAX_INCHOATE     (1 * 1000 * 1000)
 
+#define LSQUIC_DF_MAX_CRYPTO_STASH    20
 #define LSQUIC_DF_SUPPORT_SREJ_SERVER  1
 #define LSQUIC_DF_SUPPORT_SREJ_CLIENT  0
 
@@ -616,6 +621,15 @@ struct lsquic_engine_settings {
      * handle them.
      */
     int             es_support_srej;
+
+    /**
+     * The maximum number of out-of-order CRYPTO frames the mini connection
+     * stashes while waiting for the missing predecessor frames.  When the
+     * limit is hit, the connection is aborted.
+     *
+     * The default value is @ref LSQUIC_DF_MAX_CRYPTO_STASH.
+     */
+    unsigned char   es_max_crypto_stash;
 
     /**
      * Server push is not supported.  lsquic_conn_is_push_enabled() returns
@@ -1828,16 +1842,33 @@ lsquic_stream_has_unacked_data (lsquic_stream_t *s);
  * Get certificate chain returned by the server.  This can be used for
  * server certificate verification.
  *
- * The caller releases the stack using sk_X509_free().
+ * The caller owns the returned stack and certificate references and releases
+ * them using sk_X509_pop_free(chain, X509_free).
  */
 struct stack_st_X509 *
 lsquic_conn_get_server_cert_chain (lsquic_conn_t *);
 
 /**
- * Get the full certificate chain returned by the server/lient.
- * This can be used for server/client certificate verification.
+ * Get the peer's certificate chain, including the leaf certificate: the
+ * client's chain in server mode, or the server's chain in client mode.
+ * The chain does not necessarily include the root certificate.
  *
- * The caller releases the stack using sk_X509_free().
+ * Call this from on_new_conn in server mode, or from a successful on_hsk_done
+ * callback in client mode.  The TLS state may be released later.
+ * Returns NULL if the chain is unavailable.  gQUIC does not support client
+ * certificates and always returns NULL in server mode.
+ *
+ * The caller owns the returned stack and certificate references and releases
+ * them using sk_X509_pop_free(chain, X509_free).
+ */
+struct stack_st_X509 *
+lsquic_conn_get_full_peer_cert_chain (lsquic_conn_t *);
+
+/**
+ * Compatibility alias for lsquic_conn_get_full_peer_cert_chain().
+ *
+ * The caller owns the returned stack and certificate references and releases
+ * them using sk_X509_pop_free(chain, X509_free).
  */
 struct stack_st_X509 *
 lsquic_conn_get_full_cert_chain (lsquic_conn_t *);

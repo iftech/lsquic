@@ -3203,11 +3203,11 @@ ietf_full_conn_ci_destroy (struct lsquic_conn *lconn)
 #if LSQUIC_CONN_STATS
     if (conn->ifc_flags & IFC_CREATED_OK)
     {
-        LSQ_NOTICE("# ticks: %lu", conn->ifc_stats.n_ticks);
-        LSQ_NOTICE("sent %lu packets", conn->ifc_stats.out.packets);
-        LSQ_NOTICE("received %lu packets, of which %lu were not decryptable, %lu were "
-            "dups and %lu were errors; sent %lu packets, avg stream data per outgoing"
-            " packet is %lu bytes",
+        LSQ_NOTICE("# ticks: %"PRIu64, conn->ifc_stats.n_ticks);
+        LSQ_NOTICE("sent %"PRIu64" packets", conn->ifc_stats.out.packets);
+        LSQ_NOTICE("received %"PRIu64" packets, of which %"PRIu64" were not decryptable, %"PRIu64" were "
+            "dups and %"PRIu64" were errors; sent %"PRIu64" packets, avg stream data per outgoing"
+            " packet is %"PRIu64" bytes",
             conn->ifc_stats.in.packets, conn->ifc_stats.in.undec_packets,
             conn->ifc_stats.in.dup_packets, conn->ifc_stats.in.err_packets,
             conn->ifc_stats.out.packets,
@@ -3224,7 +3224,7 @@ ietf_full_conn_ci_destroy (struct lsquic_conn *lconn)
                 conn->ifc_settings->es_ptpc_err_divisor,
                 conn->ifc_ack_freq_seqno,
                 conn->ifc_min_pack_tol_sent, conn->ifc_max_pack_tol_sent);
-        LSQ_NOTICE("ACKs: delayed acks on: %s; in: %lu; processed: %lu; merged: %lu",
+        LSQ_NOTICE("ACKs: delayed acks on: %s; in: %"PRIu64"; processed: %"PRIu64"; merged: %"PRIu64,
             conn->ifc_flags & IFC_DELAYED_ACKS ? "yes" : "no",
             conn->ifc_stats.in.n_acks, conn->ifc_stats.in.n_acks_proc,
             conn->ifc_stats.in.n_acks_merged);
@@ -5648,6 +5648,7 @@ process_crypto_frame_client (struct ietf_full_conn *conn,
     {
         LSQ_DEBUG("handshake complete: ignore CRYPTO frames in "
             "non-forward-secure packets");
+        lsquic_malo_put(stream_frame);
         return parsed_len;
     }
 
@@ -5739,6 +5740,7 @@ process_stream_frame (struct ietf_full_conn *conn,
 
     if (conn_is_send_only_stream(conn, stream_frame->stream_id))
     {
+        lsquic_malo_put(stream_frame);
         ABORT_QUIETLY(0, TEC_STREAM_STATE_ERROR, "received STREAM frame "
             "on send-only stream %"PRIu64, stream_frame->stream_id);
         return 0;
@@ -5747,6 +5749,7 @@ process_stream_frame (struct ietf_full_conn *conn,
     if ((conn->ifc_flags & (IFC_SERVER|IFC_HTTP)) == IFC_HTTP
                     && SIT_BIDI_SERVER == (stream_frame->stream_id & SIT_MASK))
     {
+        lsquic_malo_put(stream_frame);
         ABORT_QUIETLY(1, HEC_STREAM_CREATION_ERROR, "HTTP/3 server "
             "is not allowed to initiate bidirectional streams (got "
             "STREAM frame for stream %"PRIu64, stream_frame->stream_id);
@@ -9055,8 +9058,8 @@ ietf_full_conn_ci_log_stats (struct lsquic_conn *lconn)
                                             conn->ifc_send_ctl.sc_cong_ctl);
     lsquic_conn_stats_diff(&conn->ifc_stats, conn->ifc_last_stats, &diff_stats);
     lsquic_logger_log1(LSQ_LOG_NOTICE, LSQLM_CONN_STATS,
-        "%s: ticks: %lu; cwnd: %"PRIu64"; conn flow: max: %"PRIu64
-        ", avail: %"PRIu64"; packets: sent: %lu, lost: %lu, retx: %lu, rcvd: %lu"
+        "%s: ticks: %"PRIu64"; cwnd: %"PRIu64"; conn flow: max: %"PRIu64
+        ", avail: %"PRIu64"; packets: sent: %"PRIu64", lost: %"PRIu64", retx: %"PRIu64", rcvd: %"PRIu64
         "; batch: count: %u; min: %u; max: %u; avg: %.2f",
         (lsquic_cid2str(LSQUIC_LOG_CONN_ID, cidstr), cidstr),
         diff_stats.n_ticks, cwnd,
