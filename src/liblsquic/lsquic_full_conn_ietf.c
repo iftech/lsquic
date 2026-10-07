@@ -3330,6 +3330,32 @@ get_new_dce (struct ietf_full_conn *conn)
 }
 
 
+static struct dcid_elem **
+find_dce_slot (struct ietf_full_conn *conn, const struct dcid_elem *dce)
+{
+    struct dcid_elem **slot;
+
+    for (slot = conn->ifc_dces; slot < DCES_END(conn); ++slot)
+        if (*slot == dce)
+            return slot;
+
+    return NULL;
+}
+
+
+static void
+release_dce (struct ietf_full_conn *conn, struct dcid_elem *dce)
+{
+    struct dcid_elem **slot;
+
+    slot = find_dce_slot(conn, dce);
+    assert(slot);
+    if (slot)
+        *slot = NULL;
+    lsquic_malo_put(dce);
+}
+
+
 static void
 queue_streams_blocked_frame (struct ietf_full_conn *conn, enum stream_dir sd)
 {
@@ -3370,10 +3396,7 @@ retire_cid_from_tp (struct ietf_full_conn *conn,
     memcpy(dce->de_srst, params->tp_preferred_address.srst,
                                                     sizeof(dce->de_srst));
     dce->de_flags = DE_SRST;
-    TAILQ_INSERT_TAIL(&conn->ifc_to_retire, dce, de_next_to_ret);
-    ++conn->ifc_n_to_retire;
-    LSQ_DEBUG("prepare to retire DCID seqno %"PRIu32, dce->de_seqno);
-    conn->ifc_send_flags |= SF_SEND_RETIRE_CID;
+    retire_dcid(conn, find_dce_slot(conn, dce));
 }
 
 
@@ -3468,7 +3491,7 @@ try_to_begin_migration (struct ietf_full_conn *conn,
                 dce->de_srst, sizeof(dce->de_srst), &conn->ifc_conn,
                 &dce->de_hash_el))
         {
-            lsquic_malo_put(dce);
+            release_dce(conn, dce);
             ABORT_WARN("cannot insert DCE");
             return BM_ERROR;
         }
@@ -10001,11 +10024,46 @@ test_new_connection_id (int duplicate)
 }
 
 
+static void
+test_dce_ownership (void)
+{
+    struct ietf_full_conn conn;
+    struct dcid_elem *dce;
+    struct transport_params params;
+    struct lsquic_mm mm;
+
+    memset(&conn, 0, sizeof(conn));
+    memset(&mm, 0, sizeof(mm));
+    assert(0 == lsquic_mm_init(&mm));
+    conn.ifc_pub.mm = &mm;
+    TAILQ_INIT(&conn.ifc_to_retire);
+
+    dce = get_new_dce(&conn);
+    assert(dce);
+    assert(conn.ifc_dces[0] == dce);
+    release_dce(&conn, dce);
+    assert(conn.ifc_dces[0] == NULL);
+
+    memset(&params, 0, sizeof(params));
+    params.tp_preferred_address.cid.len = 1;
+    params.tp_preferred_address.cid.idbuf[0] = 0xC0;
+    retire_cid_from_tp(&conn, &params);
+    assert(conn.ifc_dces[0] == NULL);
+    assert(conn.ifc_n_to_retire == 1);
+    dce = TAILQ_FIRST(&conn.ifc_to_retire);
+    assert(dce);
+    TAILQ_REMOVE(&conn.ifc_to_retire, dce, de_next_to_ret);
+    lsquic_malo_put(dce);
+    lsquic_mm_cleanup(&mm);
+}
+
+
 void
 lsquic_ietf_full_conn_test_new_connection_id (void)
 {
     test_new_connection_id(0);
     test_new_connection_id(1);
+    test_dce_ownership();
 }
 
 
