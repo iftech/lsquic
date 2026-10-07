@@ -2286,7 +2286,8 @@ Bitmask of which paths in `ifc_paths`_ are being used.
 ifc_mig_path_id
 ---------------
 
-Path ID of the path being migrated to.
+Path ID of the preferred-address migration, or ``N_PATHS`` when unset.
+Wiping that path invalidates the ID before its slot can be reused.
 
 ifc_active_cids_limit
 ---------------------
@@ -2526,10 +2527,15 @@ the newly created incoming packet (in ``pi_path_id``).  The packet is
 then passed to ``ci_packet_in()``.
 
 In full IETF connections, a newly observed path remains in
-``ifc_pending_paths`` until packet processing accepts it into receive history.
-Acceptance moves it to ``ifc_used_paths``.  At the end of ``ci_packet_in()``,
+``ifc_pending_paths`` until packet processing accepts it into receive history
+and initializes the path.  Only then is it moved to ``ifc_used_paths``.
+At the end of ``ci_packet_in()``,
 any still-pending slot for that packet is discarded, including when the
-connection is already closing.  Existing committed paths are preserved.
+connection is already closing.  This also reclaims paths whose initialization
+was skipped because frame processing switched to a different path.  If path
+initialization fails for lack of a destination CID, its slot is reclaimed
+immediately.  Wiping a slot clears its pending challenges, responses, and
+validation alarm.
 
 The first part of the path-switching logic is in ``process_regular_packet()``:
 
@@ -2576,12 +2582,16 @@ configuration) and the server provides the "preferred_address" transport
 parameter.  The migration process begins once the handshake is confirmed;
 see the ``maybe_start_migration()`` function.  The SCID provided by the
 server as part of the "preferred_address" transport parameter is used as the
-destination CID and path #1 is picked:
+destination CID.  ``find_unused_path()`` selects a slot that is neither used
+nor pending; migration is declined when no slot is available:
 
 
 ::
 
-    copath = &conn->ifc_paths[1];
+    copath = find_unused_path(conn);
+    if (!copath)
+        return BM_NOT_MIGRATING;
+    /* --- 8< --- DCID allocation elided... */
     migra_begin(conn, copath, dce, (struct sockaddr *) &sockaddr, params);
     return BM_MIGRATING;
 
@@ -2620,7 +2630,10 @@ packet, and the packet is scheduled.  All this happens in the
 If the path response is not received before a timeout, another path challenge
 is sent, up to the number of elements in ``cop_path_chals``.  The timeout
 uses exponential back-off; it is not based on RTT, because the RTT of the
-new path is unknown.
+new path is unknown.  Unvalidated paths use the same retry budget.  Once
+that budget is exhausted, a non-current path is reclaimed and its destination
+CID is queued for retirement unless another path still uses it or its DCE
+has already been retired.  The current path is retained.
 
 Receiving Path Responses
 ------------------------

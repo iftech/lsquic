@@ -469,7 +469,7 @@ struct ietf_full_conn
     uint8_t                     ifc_incoming_ecn;
     unsigned char               ifc_cur_path_id;    /* Indexes ifc_paths */
     unsigned char               ifc_used_paths;     /* Bitmask */
-    unsigned char               ifc_pending_paths;  /* Unauthenticated paths */
+    unsigned char               ifc_pending_paths;  /* Provisional paths */
     unsigned char               ifc_mig_path_id;
     /* ifc_active_cids_limit is the maximum number of CIDs at any one time this
      * endpoint is allowed to issue to peer.  If the TP value exceeds cn_n_cces,
@@ -697,6 +697,10 @@ cid_throt_alarm_expired (enum alarm_id al_id, void *ctx,
 }
 
 
+static int
+maybe_retire_dcid (struct ietf_full_conn *, const lsquic_cid_t *);
+
+
 static void
 wipe_path (struct ietf_full_conn *conn, unsigned path_id)
 {
@@ -706,6 +710,10 @@ wipe_path (struct ietf_full_conn *conn, unsigned path_id)
     conn->ifc_paths[path_id].cop_path.np_peer_ctx = peer_ctx;
     conn->ifc_used_paths &= ~(1 << path_id);
     conn->ifc_pending_paths &= ~(1 << path_id);
+    conn->ifc_send_flags &= ~((SF_SEND_PATH_CHAL | SF_SEND_PATH_RESP) << path_id);
+    lsquic_alarmset_unset(&conn->ifc_alset, AL_PATH_CHAL + path_id);
+    if (conn->ifc_mig_path_id == path_id)
+        conn->ifc_mig_path_id = N_PATHS;
 }
 
 
@@ -720,7 +728,8 @@ discard_pending_path (struct ietf_full_conn *conn, unsigned path_id)
 static void
 commit_pending_path (struct ietf_full_conn *conn, unsigned path_id)
 {
-    if (conn->ifc_pending_paths & (1 << path_id))
+    if ((conn->ifc_pending_paths & (1 << path_id))
+                && (conn->ifc_paths[path_id].cop_flags & COP_INITIALIZED))
     {
         conn->ifc_pending_paths &= ~(1 << path_id);
         conn->ifc_used_paths |= 1 << path_id;
@@ -736,15 +745,7 @@ path_chal_alarm_expired (enum alarm_id al_id, void *ctx,
     const unsigned path_id = al_id - AL_PATH_CHAL;
     struct conn_path *const copath = &conn->ifc_paths[path_id];
 
-    if (!(copath->cop_flags & COP_VALIDATED)
-                            && conn->ifc_cur_path_id != path_id)
-    {
-        LSQ_INFO("path #%u failed validation", path_id);
-        lsquic_send_ctl_cancel_path_verification(&conn->ifc_send_ctl,
-                                                        &copath->cop_path);
-        wipe_path(conn, path_id);
-    }
-    else if (copath->cop_n_chals < sizeof(copath->cop_path_chals)
+    if (copath->cop_n_chals < sizeof(copath->cop_path_chals)
                                         / sizeof(copath->cop_path_chals[0]))
     {
         LSQ_DEBUG("path #%u challenge expired, schedule another one", path_id);
@@ -757,6 +758,10 @@ path_chal_alarm_expired (enum alarm_id al_id, void *ctx,
         /* There may be a lingering challenge if its generation is delayed */
         lsquic_send_ctl_cancel_path_verification(&conn->ifc_send_ctl,
                                                         &copath->cop_path);
+        /* Retire Prior To may already have removed this path's DCE. */
+        if ((copath->cop_flags & COP_INITIALIZED)
+                                            && copath->cop_path.np_dcid.len)
+            maybe_retire_dcid(conn, &copath->cop_path.np_dcid);
         wipe_path(conn, path_id);
     }
     else
@@ -1312,6 +1317,7 @@ ietf_full_conn_init (struct ietf_full_conn *conn,
     conn->ifc_max_ack_packno[PNS_HSK] = IQUIC_INVALID_PACKNO;
     conn->ifc_max_ack_packno[PNS_APP] = IQUIC_INVALID_PACKNO;
     conn->ifc_max_ackable_packno_in = 0;
+    conn->ifc_mig_path_id = N_PATHS;
     conn->ifc_paths[0].cop_path.np_path_id = 0;
     conn->ifc_paths[1].cop_path.np_path_id = 1;
     conn->ifc_paths[2].cop_path.np_path_id = 2;
@@ -4616,7 +4622,6 @@ generate_path_chal_frame (struct ietf_full_conn *conn, lsquic_time_t now,
      *  (confirmed path or incoming packet >= 400 bytes). */
     if (copath->cop_flags & COP_ALLOW_MTU_PADDING)
         maybe_pad_packet(conn, packet_out);
-    /* Reclaim an unvalidated path if its first challenge times out. */
     lsquic_alarmset_set(&conn->ifc_alset, AL_PATH_CHAL + path_id,
                 now + (INITIAL_CHAL_TIMEOUT << (copath->cop_n_chals - 1)));
 }
@@ -5051,8 +5056,9 @@ process_path_challenge_frame (struct ietf_full_conn *conn,
 
 /* Why "maybe?"  Because it is possible that the peer did not provide us
  * enough CIDs and we had to reuse one.  See init_new_path().
+ * Return -1 if the assigned DCE is absent (it may already be retired).
  */
-static void
+static int
 maybe_retire_dcid (struct ietf_full_conn *conn, const lsquic_cid_t *dcid)
 {
     struct conn_path *copath;
@@ -5068,7 +5074,7 @@ maybe_retire_dcid (struct ietf_full_conn *conn, const lsquic_cid_t *dcid)
     {
         LSQ_INFOC("cannot retire %"CID_FMT", as it is used on more than one"
             "path ", CID_BITS(dcid));
-        return;
+        return 0;
     }
 
     for (dce = conn->ifc_dces; dce < DCES_END(conn); ++dce)
@@ -5077,12 +5083,10 @@ maybe_retire_dcid (struct ietf_full_conn *conn, const lsquic_cid_t *dcid)
             break;
 
     if (dce == DCES_END(conn))
-    {
-        ABORT_ERROR("cannot find assigned DCID to retire");
-        return;
-    }
+        return -1;
 
     retire_dcid(conn, dce);
+    return 0;
 }
 
 
@@ -5136,7 +5140,8 @@ switch_path_to (struct ietf_full_conn *conn, unsigned char path_id)
     lsquic_send_ctl_repath(&conn->ifc_send_ctl,
         CUR_NPATH(conn), &conn->ifc_paths[path_id].cop_path,
         keep_path_properties);
-    maybe_retire_dcid(conn, &CUR_NPATH(conn)->np_dcid);
+    if (0 != maybe_retire_dcid(conn, &CUR_NPATH(conn)->np_dcid))
+        ABORT_ERROR("cannot find assigned DCID to retire");
     conn->ifc_cur_path_id = path_id;
     conn->ifc_pub.path = CUR_NPATH(conn);
     conn->ifc_conn.cn_cur_cce_idx = CUR_CPATH(conn)->cop_cce_idx;
@@ -6922,7 +6927,10 @@ on_new_or_unconfirmed_path (struct ietf_full_conn *conn,
                 path->cop_flags |= COP_ALLOW_MTU_PADDING;
         }
         else
+        {
+            wipe_path(conn, packet_in->pi_path_id);
             return -1;
+        }
 
         conn->ifc_send_flags |= SF_SEND_PATH_CHAL << packet_in->pi_path_id;
         LSQ_DEBUG("scheduled return path challenge on path %hhu",
@@ -7389,8 +7397,7 @@ process_regular_packet (struct ietf_full_conn *conn,
     if (0 == (conn->ifc_flags & IFC_SERVER)
         && packet_in->pi_path_id != conn->ifc_cur_path_id
         && !(packet_in->pi_path_id == conn->ifc_mig_path_id
-                //&& migra_is_on(conn, conn->ifc_mig_path_id)
-             ))
+                && migra_is_on(conn, conn->ifc_mig_path_id)))
     {
         if ((conn->ifc_paths[packet_in->pi_path_id].cop_flags & COP_RETIRED))
         {
@@ -7505,7 +7512,6 @@ process_regular_packet (struct ietf_full_conn *conn,
                                                     packet_in->pi_received);
     switch (st) {
     case REC_ST_OK:
-        commit_pending_path(conn, packet_in->pi_path_id);
         if (!(conn->ifc_flags & (IFC_SERVER|IFC_DCID_SET)))
             record_dcid(conn, packet_in);
         saved_path_id = conn->ifc_cur_path_id;
@@ -7531,6 +7537,7 @@ process_regular_packet (struct ietf_full_conn *conn,
                     return -1;
             }
         }
+        commit_pending_path(conn, packet_in->pi_path_id);
         if (lsquic_packet_in_non_probing(packet_in)
                         && packet_in->pi_packno > conn->ifc_max_non_probing)
             conn->ifc_max_non_probing = packet_in->pi_packno;
@@ -10075,6 +10082,162 @@ lsquic_ietf_full_conn_test_new_connection_id (void)
 }
 
 
+enum test_path_timeout_mode {
+    TEST_PATH_UNIQUE_CID,
+    TEST_PATH_SHARED_CID,
+    TEST_PATH_CURRENT,
+    TEST_PATH_RETIRED_CID,
+};
+
+
+static void
+test_path_validation_timeout (enum test_path_timeout_mode mode)
+{
+    struct ietf_full_conn conn;
+    struct dcid_elem dce;
+    struct conn_path *path;
+    unsigned n;
+
+    memset(&conn, 0, sizeof(conn));
+    memset(&dce, 0, sizeof(dce));
+    TAILQ_INIT(&conn.ifc_to_retire);
+    TAILQ_INIT(&conn.ifc_send_ctl.sc_scheduled_packets);
+    conn.ifc_used_paths = (1 << 0) | (1 << 1);
+    conn.ifc_mig_path_id = 1;
+    path = &conn.ifc_paths[1];
+    path->cop_flags = COP_INITIALIZED;
+    path->cop_path.np_dcid.len = 1;
+    path->cop_path.np_dcid.idbuf[0] = 0xB0;
+    dce.de_cid = path->cop_path.np_dcid;
+    dce.de_flags = DE_ASSIGNED;
+    dce.de_seqno = 1;
+    conn.ifc_dces[0] = &dce;
+    if (mode == TEST_PATH_SHARED_CID)
+        conn.ifc_paths[0].cop_path.np_dcid = dce.de_cid;
+    else if (mode == TEST_PATH_CURRENT)
+        conn.ifc_cur_path_id = 1;
+
+    for (n = 1; n < sizeof(path->cop_path_chals)
+                                / sizeof(path->cop_path_chals[0]); ++n)
+    {
+        path->cop_n_chals = n;
+        conn.ifc_send_flags = 0;
+        path_chal_alarm_expired(AL_PATH_CHAL_1, &conn, 0, 0);
+        assert(conn.ifc_send_flags & (SF_SEND_PATH_CHAL << 1));
+        assert(conn.ifc_used_paths & (1 << 1));
+        assert(conn.ifc_dces[0] == &dce);
+    }
+
+    path->cop_n_chals = n;
+    conn.ifc_send_flags = SF_SEND_PATH_RESP << 1;
+    if (mode == TEST_PATH_RETIRED_CID)
+    {
+        assert(0 == retire_dcids_prior_to(&conn, dce.de_seqno + 1));
+        assert(conn.ifc_dces[0] == NULL);
+        assert(conn.ifc_n_to_retire == 1);
+    }
+    lsquic_alarmset_set(&conn.ifc_alset, AL_PATH_CHAL_1, 1);
+    path_chal_alarm_expired(AL_PATH_CHAL_1, &conn, 0, 0);
+    assert(!(conn.ifc_flags & IFC_ERROR));
+    if (mode == TEST_PATH_CURRENT)
+    {
+        assert(conn.ifc_used_paths & (1 << 1));
+        assert(conn.ifc_dces[0] == &dce);
+        assert(conn.ifc_n_to_retire == 0);
+    }
+    else
+    {
+        assert(conn.ifc_used_paths == (1 << 0));
+        assert(conn.ifc_mig_path_id == N_PATHS);
+        assert(!(conn.ifc_send_flags
+                    & ((SF_SEND_PATH_CHAL | SF_SEND_PATH_RESP) << 1)));
+        assert(!migra_is_on(&conn, 1));
+        assert(find_unused_path(&conn) == path);
+        if (mode == TEST_PATH_SHARED_CID)
+        {
+            assert(conn.ifc_dces[0] == &dce);
+            assert(conn.ifc_n_to_retire == 0);
+        }
+        else
+        {
+            assert(conn.ifc_dces[0] == NULL);
+            assert(conn.ifc_n_to_retire == 1);
+            assert(TAILQ_FIRST(&conn.ifc_to_retire) == &dce);
+            assert(conn.ifc_send_flags & SF_SEND_RETIRE_CID);
+        }
+    }
+}
+
+
+static int
+test_packet_switches_other_path (struct ietf_full_conn *conn,
+                                        struct lsquic_packet_in *packet_in)
+{
+    /* Model frame processing switching Y while the packet arrived on X. */
+    conn->ifc_cur_path_id = 2;
+    conn->ifc_pub.path = CUR_NPATH(conn);
+    commit_pending_path(conn, packet_in->pi_path_id);
+    return 0;
+}
+
+
+static void
+test_pending_path_after_switch (void)
+{
+    struct ietf_full_conn conn;
+    struct lsquic_packet_in packet_in;
+
+    memset(&conn, 0, sizeof(conn));
+    memset(&packet_in, 0, sizeof(packet_in));
+    conn.ifc_used_paths = (1 << 0) | (1 << 2);
+    conn.ifc_pending_paths = 1 << 1;
+    conn.ifc_paths[2].cop_flags = COP_INITIALIZED | COP_VALIDATED;
+    conn.ifc_send_flags = SF_SEND_PATH_RESP << 1;
+    conn.ifc_process_incoming_packet = test_packet_switches_other_path;
+    packet_in.pi_path_id = 1;
+
+    ietf_full_conn_ci_packet_in(&conn.ifc_conn, &packet_in);
+    assert(conn.ifc_cur_path_id == 2);
+    assert(conn.ifc_pub.path == &conn.ifc_paths[2].cop_path);
+    assert(conn.ifc_used_paths == ((1 << 0) | (1 << 2)));
+    assert(conn.ifc_paths[2].cop_flags & COP_VALIDATED);
+    assert(conn.ifc_pending_paths == 0);
+    assert(!(conn.ifc_send_flags & (SF_SEND_PATH_RESP << 1)));
+    assert(find_unused_path(&conn) == &conn.ifc_paths[1]);
+}
+
+
+static void
+test_path_init_failure (void)
+{
+    struct ietf_full_conn conn;
+    struct lsquic_packet_in packet_in;
+    struct conn_cid_elem cce;
+
+    memset(&conn, 0, sizeof(conn));
+    memset(&packet_in, 0, sizeof(packet_in));
+    memset(&cce, 0, sizeof(cce));
+    conn.ifc_conn.cn_cces = &cce;
+    conn.ifc_conn.cn_n_cces = 1;
+    conn.ifc_conn.cn_cces_mask = 1;
+    conn.ifc_conn.cn_cces[0].cce_cid.len = 1;
+    conn.ifc_conn.cn_cces[0].cce_cid.idbuf[0] = 0xA0;
+    conn.ifc_used_paths = (1 << 0) | (1 << 1);
+    conn.ifc_paths[0].cop_path.np_dcid.len = 1;
+    conn.ifc_paths[0].cop_path.np_dcid.idbuf[0] = 0xB0;
+    conn.ifc_send_flags = SF_SEND_PATH_RESP << 1;
+    packet_in.pi_path_id = 1;
+    packet_in.pi_dcid = conn.ifc_conn.cn_cces[0].cce_cid;
+
+    /* A fresh SCID requires a new peer DCID, but none is available. */
+    assert(-1 == on_new_or_unconfirmed_path(&conn, &packet_in));
+    assert(conn.ifc_used_paths == (1 << 0));
+    assert(conn.ifc_pending_paths == 0);
+    assert(!(conn.ifc_send_flags & (SF_SEND_PATH_RESP << 1)));
+    assert(find_unused_path(&conn) == &conn.ifc_paths[1]);
+}
+
+
 void
 lsquic_ietf_full_conn_test_path (void)
 {
@@ -10083,6 +10246,13 @@ lsquic_ietf_full_conn_test_path (void)
     struct sockaddr_in local, peer_a, peer_b;
     struct lsquic_packet_in packet_in;
     unsigned path_id, i;
+
+    test_pending_path_after_switch();
+    test_path_validation_timeout(TEST_PATH_RETIRED_CID);
+    test_path_validation_timeout(TEST_PATH_UNIQUE_CID);
+    test_path_validation_timeout(TEST_PATH_SHARED_CID);
+    test_path_validation_timeout(TEST_PATH_CURRENT);
+    test_path_init_failure();
 
     memset(&conn, 0, sizeof(conn));
     conn.ifc_used_paths = 1 << 0;
@@ -10145,6 +10315,7 @@ lsquic_ietf_full_conn_test_path (void)
 
     path_id = ietf_full_conn_ci_record_addrs(&conn.ifc_conn, (void *) 1,
                     (struct sockaddr *) &local, (struct sockaddr *) &peer_b);
+    conn.ifc_paths[path_id].cop_flags |= COP_INITIALIZED;
     commit_pending_path(&conn, path_id);
     assert(conn.ifc_pending_paths == 0);
     assert(conn.ifc_used_paths == ((1 << 0) | (1 << 1)));
@@ -10179,6 +10350,19 @@ lsquic_ietf_full_conn_test_path (void)
     assert(conn.ifc_paths[1].cop_path.np_peer_ctx == (void *) 2);
     assert(lsquic_sockaddr_eq(NP_PEER_SA(&conn.ifc_paths[1].cop_path),
                                             (struct sockaddr *) &peer_a));
+
+    conn.ifc_mig_path_id = path_id;
+    wipe_path(&conn, path_id);
+    assert(conn.ifc_mig_path_id == N_PATHS);
+    packet_in.pi_path_id = ietf_full_conn_ci_record_addrs(&conn.ifc_conn,
+                    NULL, (struct sockaddr *) &local,
+                    (struct sockaddr *) &peer_b);
+    assert(packet_in.pi_path_id == path_id);
+    packet_in.pi_header_type = HETY_SHORT;
+    ietf_full_conn_ci_packet_in(&conn.ifc_conn, &packet_in);
+    assert(conn.ifc_pending_paths == 0);
+    assert(!(conn.ifc_used_paths & (1 << path_id)));
+
 }
 
 
