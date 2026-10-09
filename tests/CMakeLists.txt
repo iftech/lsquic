@@ -60,6 +60,7 @@ SET(TESTS
     packno_len
     path
     parse_packet_in
+    ping_alarm
     purga
     push_disabled
     qenc_hdl
