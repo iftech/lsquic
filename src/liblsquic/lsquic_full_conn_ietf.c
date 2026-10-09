@@ -8608,9 +8608,8 @@ ietf_full_conn_ci_tick (struct lsquic_conn *lconn, lsquic_time_t now)
      *     frames without coordination can produce an excessive number of
      *     packets and poor performance.
      */
-    if (conn->ifc_ping_period
-                        && lsquic_hash_count(conn->ifc_pub.all_streams) >
-                           conn->ifc_pub.n_special_streams)
+    /* Ping even with no open streams: libp2p keeps idle connections open. */
+    if (conn->ifc_ping_period)
         lsquic_alarmset_set(&conn->ifc_alset, AL_PING,
                                                 now + conn->ifc_ping_period);
 
