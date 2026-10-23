@@ -2917,7 +2917,7 @@ process_streams_ready_to_send (struct ietf_full_conn *conn)
 
     conn->ifc_pii->pii_init(&pi, TAILQ_FIRST(&conn->ifc_pub.sending_streams),
         TAILQ_LAST(&conn->ifc_pub.sending_streams, lsquic_streams_tailq),
-        (uintptr_t) &TAILQ_NEXT((lsquic_stream_t *) NULL, next_send_stream),
+        offsetof(struct lsquic_stream, next_send_stream.tqe_next),
         &conn->ifc_pub, "send", NULL, NULL);
 
     for (stream = conn->ifc_pii->pii_first(&pi); stream;
@@ -4112,6 +4112,23 @@ ietf_full_conn_ci_is_tickable (struct lsquic_conn *lconn)
 }
 
 
+static enum packnum_space
+select_conn_close_pns (const struct ietf_full_conn *conn)
+{
+    if ((conn->ifc_flags & (IFC_SERVER|IFC_IGNORE_HSK)) ||
+            /* Only use PNS_APP if client sent enough crypto output for the
+             * server to be able to decrypt it.
+             */
+                    (conn->ifc_u.cli.ifcli_flags & IFCLI_HSK_CRYPTO_SENT))
+        return PNS_APP;
+    else if (iquic_esf_is_enc_level_ready(conn->ifc_conn.cn_enc_session,
+                                                            ENC_LEV_HSK))
+        return PNS_HSK;
+    else
+        return PNS_INIT;
+}
+
+
 static enum tick_st
 immediate_close (struct ietf_full_conn *conn)
 {
@@ -4140,14 +4157,7 @@ immediate_close (struct ietf_full_conn *conn)
                                     && conn->ifc_settings->es_silent_close)
         return TICK_CLOSE;
 
-    if ((conn->ifc_flags & (IFC_SERVER|IFC_IGNORE_HSK)) ||
-            /* Only use PNS_APP if client sent enough crypto output for the
-             * server to be able to decrypt it.
-             */
-                    (conn->ifc_u.cli.ifcli_flags & IFCLI_HSK_CRYPTO_SENT))
-        pns = PNS_APP;
-    else
-        pns = PNS_HSK;
+    pns = select_conn_close_pns(conn);
 
     packet_out = lsquic_send_ctl_new_packet_out(&conn->ifc_send_ctl, 0,
                                                     pns, CUR_NPATH(conn));
@@ -4158,7 +4168,7 @@ immediate_close (struct ietf_full_conn *conn)
     }
 
     assert(conn->ifc_flags & (IFC_ERROR|IFC_ABORTED|IFC_HSK_FAILED));
-    if (pns == PNS_HSK && conn->ifc_error.app_error)
+    if ((pns == PNS_HSK || pns == PNS_INIT) && conn->ifc_error.app_error)
     {
         /* [RFC 9000] Section 10.2.3: clear app code and reason: */
         conn_err = CONN_ERR(0, TEC_APPLICATION_ERROR);
@@ -4232,7 +4242,7 @@ process_streams_read_events (struct ietf_full_conn *conn)
     {
         conn->ifc_pii->pii_init(&pi, TAILQ_FIRST(&conn->ifc_pub.read_streams),
             TAILQ_LAST(&conn->ifc_pub.read_streams, lsquic_streams_tailq),
-            (uintptr_t) &TAILQ_NEXT((lsquic_stream_t *) NULL, next_read_stream),
+            offsetof(struct lsquic_stream, next_read_stream.tqe_next),
             &conn->ifc_pub, labels[iters], NULL, NULL);
 
         needs_service = 0;
@@ -4320,7 +4330,7 @@ process_streams_write_events (struct ietf_full_conn *conn, int high_prio)
 
     conn->ifc_pii->pii_init(&pi, TAILQ_FIRST(&conn->ifc_pub.write_streams),
         TAILQ_LAST(&conn->ifc_pub.write_streams, lsquic_streams_tailq),
-        (uintptr_t) &TAILQ_NEXT((lsquic_stream_t *) NULL, next_write_stream),
+        offsetof(struct lsquic_stream, next_write_stream.tqe_next),
         &conn->ifc_pub,
         high_prio ? "write-high" : "write-low", NULL, NULL);
 
@@ -4347,14 +4357,7 @@ generate_connection_close_packet (struct ietf_full_conn *conn)
     int sz;
     enum packnum_space pns;
 
-    if ((conn->ifc_flags & (IFC_SERVER|IFC_IGNORE_HSK)) ||
-            (conn->ifc_u.cli.ifcli_flags & IFCLI_HSK_CRYPTO_SENT))
-        pns = PNS_APP;
-    else if (iquic_esf_is_enc_level_ready(conn->ifc_conn.cn_enc_session,
-                                                            ENC_LEV_HSK))
-        pns = PNS_HSK;
-    else
-        pns = PNS_INIT;
+    pns = select_conn_close_pns(conn);
 
     packet_out = lsquic_send_ctl_new_packet_out(&conn->ifc_send_ctl, 0, pns,
                                                                 CUR_NPATH(conn));
@@ -6816,7 +6819,12 @@ process_packet_frame (struct ietf_full_conn *conn,
     {
         LSQ_DEBUG("invalid frame %u (bytes: %s) at encryption level %s",
             type, HEXSTR(p, MIN(len, 8), str), lsquic_enclev2str[enc_level]);
-        ABORT_QUIETLY(0, TEC_FRAME_ENCODING_ERROR, "invalid frame");
+        if (type == QUIC_FRAME_INVALID)
+            ABORT_QUIETLY(0, TEC_FRAME_ENCODING_ERROR, "invalid frame");
+        else
+            ABORT_QUIETLY(0, TEC_PROTOCOL_VIOLATION, "frame %s is not "
+                "allowed at encryption level %s", frame_type_2_str[type],
+                lsquic_enclev2str[enc_level]);
         return 0;
     }
 }
@@ -8376,8 +8384,10 @@ arm_ping_alarm (struct ietf_full_conn *conn, lsquic_time_t now)
      *     frames without coordination can produce an excessive number of
      *     packets and poor performance.
      */
-    /* Ping even when no application streams are open. */
-    if (conn->ifc_ping_period)
+    if (conn->ifc_ping_period
+            && (conn->ifc_enpub->enp_settings.es_ping_without_streams
+                || lsquic_hash_count(conn->ifc_pub.all_streams) >
+                   conn->ifc_pub.n_special_streams))
         lsquic_alarmset_set(&conn->ifc_alset, AL_PING,
                                                 now + conn->ifc_ping_period);
 }
@@ -10383,20 +10393,24 @@ lsquic_ietf_full_conn_test_path (void)
 
 
 void
-lsquic_ietf_full_conn_test_ping_alarm (unsigned results[3])
+lsquic_ietf_full_conn_test_ping_alarm (unsigned results[4])
 {
     enum {
         NO_STREAMS,
+        NO_STREAMS_ENABLED,
         LAST_STREAM_CLOSED,
         NO_PING_PERIOD,
     };
     struct ietf_full_conn conn;
+    struct lsquic_engine_public enpub;
     struct lsquic_stream special, app;
     struct lsquic_hash_elem *el;
 
     memset(&conn, 0, sizeof(conn));
+    memset(&enpub, 0, sizeof(enpub));
     memset(&special, 0, sizeof(special));
     memset(&app, 0, sizeof(app));
+    conn.ifc_enpub = &enpub;
     conn.ifc_pub.all_streams = lsquic_hash_create();
     assert(conn.ifc_pub.all_streams);
     conn.ifc_ping_period = 15000000;
@@ -10405,6 +10419,13 @@ lsquic_ietf_full_conn_test_ping_alarm (unsigned results[3])
     results[NO_STREAMS] = !!lsquic_alarmset_is_set(&conn.ifc_alset, AL_PING);
 
     lsquic_alarmset_unset(&conn.ifc_alset, AL_PING);
+    enpub.enp_settings.es_ping_without_streams = 1;
+    arm_ping_alarm(&conn, 1);
+    results[NO_STREAMS_ENABLED] =
+                        !!lsquic_alarmset_is_set(&conn.ifc_alset, AL_PING);
+
+    lsquic_alarmset_unset(&conn.ifc_alset, AL_PING);
+    enpub.enp_settings.es_ping_without_streams = 0;
     special.id = 2;
     assert(lsquic_hash_insert(conn.ifc_pub.all_streams, &special.id,
                     sizeof(special.id), &special, &special.sm_hash_el));

@@ -6,6 +6,7 @@
 
 enum {
     NO_STREAMS,
+    NO_STREAMS_ENABLED,
     LAST_STREAM_CLOSED,
     NO_PING_PERIOD,
     N_RESULTS,
@@ -25,8 +26,9 @@ main (void)
     lsquic_ietf_full_conn_test_ping_alarm(results);
     lsquic_global_cleanup();
 
-    assert(results[NO_STREAMS] == 1);
-    assert(results[LAST_STREAM_CLOSED] == 1);
+    assert(results[NO_STREAMS] == 0);
+    assert(results[NO_STREAMS_ENABLED] == 1);
+    assert(results[LAST_STREAM_CLOSED] == 0);
     assert(results[NO_PING_PERIOD] == 0);
 
     return 0;
