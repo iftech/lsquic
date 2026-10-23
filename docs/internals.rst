@@ -2391,6 +2391,12 @@ information:
 
 -   Incoming path challenge.
 
+-   Received and sent wire bytes.  On an unvalidated path, PATH_CHALLENGE
+    and PATH_RESPONSE padding must fit within three times the received bytes,
+    after accounting for sent and queued packets on that path, including
+    headers and authentication tags.  Padding is omitted if 1200 bytes cannot
+    fit and limited to the remaining budget otherwise.
+
 -   Spin bit (``cop_max_packno``, ``cop_spin_bit``, and ``COP_SPIN_BIT``).
 
 -   DPLPMTUD state.
